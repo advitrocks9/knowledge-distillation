@@ -1,11 +1,19 @@
 """
 Distill Qwen2.5-Coder-1.5B (teacher) into Qwen2.5-Coder-0.5B (student).
 
-Three loss variants for now (gkd will come later):
+One script, --loss flag picks the variant.
+
   ce          plain next-token cross-entropy on the corpus, teacher unused.
               Baseline -- if a method beats this, distillation is doing work.
   fkl         forward KL with temperature scaling (Hinton et al., 2015).
-  rkl         reverse KL on teacher-forced positions (Gu et al., 2024).
+  rkl         reverse KL on teacher-forced positions (the off-policy half of
+              MiniLLM's recipe; Gu et al., 2024).
+  gkd         on-policy reverse KL: sample student rollouts from the prefix,
+              compute teacher probs on the same prefixes, minimise reverse KL
+              there (Agarwal et al., 2024 -- GKD).
+
+GKD is the cheap stand-in for the full MiniLLM REINFORCE estimator. It
+captures the fix for distribution shift without policy-gradient variance.
 """
 
 from __future__ import annotations
@@ -33,9 +41,12 @@ class Cfg:
     eval_every: int = 500
     batch_size: int = 4
     grad_accum: int = 2
-    lr: float = 5e-5
+    lr: float = 2e-5
     warmup: int = 100
     temperature: float = 1.0
+    rollout_temperature: float = 1.0
+    rollout_prompt_len: int = 64
+    rollout_new: int = 64
     seed: int = 0
     log_every: int = 50
 
@@ -52,6 +63,7 @@ def cosine_warmup(opt: torch.optim.Optimizer, warmup: int, total: int) -> Lambda
 def shift_logits_targets(
     logits: torch.Tensor, ids: torch.Tensor, pad_id: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return (logits[:-1], targets[1:], mask) -- mask is 1 where target != pad."""
     sl = logits[:, :-1, :].contiguous()
     tg = ids[:, 1:].contiguous()
     mask = (tg != pad_id).float()
@@ -86,6 +98,27 @@ def reverse_kl(
     p_s = log_s.exp()
     per_tok = (p_s * (log_s - log_t)).sum(dim=-1)
     return (T * T) * (per_tok * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+@torch.no_grad()
+def sample_student_rollouts(
+    student: torch.nn.Module,
+    prompt_ids: torch.Tensor,
+    n_new: int,
+    temperature: float,
+) -> torch.Tensor:
+    student.eval()
+    out = student.generate(
+        prompt_ids,
+        max_new_tokens=n_new,
+        do_sample=True,
+        temperature=temperature,
+        top_k=0,
+        top_p=1.0,
+        pad_token_id=student.config.eos_token_id,
+    )
+    student.train()
+    return out
 
 
 @torch.no_grad()
@@ -137,6 +170,9 @@ def distill(cfg: Cfg) -> dict:
         f"effective_bs={cfg.batch_size * cfg.grad_accum}  "
         f"train={tuple(train_ids.shape)}  val={tuple(val_ids.shape)}"
     )
+    print(f"student params: {sum(p.numel() for p in student.parameters()):,}")
+    if teacher is not None:
+        print(f"teacher params: {sum(p.numel() for p in teacher.parameters()):,}")
 
     opt = torch.optim.AdamW(student.parameters(), lr=cfg.lr, betas=(0.9, 0.95), weight_decay=0.01)
     sched = cosine_warmup(opt, cfg.warmup, cfg.steps)
@@ -163,7 +199,7 @@ def distill(cfg: Cfg) -> dict:
         if cfg.loss == "ce":
             out = student(batch)
             loss = ce_loss(out.logits, batch, pad_id)
-        else:
+        elif cfg.loss in ("fkl", "rkl"):
             with torch.no_grad():
                 t_logits = teacher(batch).logits
             s_out = student(batch)
@@ -171,10 +207,25 @@ def distill(cfg: Cfg) -> dict:
             tl = t_logits[:, :-1, :].contiguous()
             if cfg.loss == "fkl":
                 loss = forward_kl(sl, tl, mask, cfg.temperature)
-            elif cfg.loss == "rkl":
-                loss = reverse_kl(sl, tl, mask, cfg.temperature)
             else:
-                raise ValueError(cfg.loss)
+                loss = reverse_kl(sl, tl, mask, cfg.temperature)
+        elif cfg.loss == "gkd":
+            prompt = batch[:, : cfg.rollout_prompt_len]
+            full = sample_student_rollouts(
+                student, prompt, n_new=cfg.rollout_new,
+                temperature=cfg.rollout_temperature,
+            )
+            with torch.no_grad():
+                t_logits = teacher(full).logits
+            s_out = student(full)
+            sl, _, mask = shift_logits_targets(s_out.logits, full, pad_id)
+            tl = t_logits[:, :-1, :].contiguous()
+            # only score the rollout positions, not the original prompt
+            mask = mask.clone()
+            mask[:, : cfg.rollout_prompt_len - 1] = 0
+            loss = reverse_kl(sl, tl, mask, cfg.temperature)
+        else:
+            raise ValueError(cfg.loss)
 
         loss = loss / cfg.grad_accum
         loss.backward()
@@ -184,13 +235,15 @@ def distill(cfg: Cfg) -> dict:
         if accum >= cfg.grad_accum:
             torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
             opt.step()
-            sched.step()
             opt.zero_grad(set_to_none=True)
             accum = 0
             full_loss = accum_loss
             accum_loss = 0.0
         else:
             full_loss = None
+        # step the lr scheduler every iteration so the cosine schedule
+        # decays over real wall-clock training, not over optimiser steps
+        sched.step()
 
         if step % cfg.log_every == 0:
             wc = time.time() - t0
@@ -214,12 +267,14 @@ def distill(cfg: Cfg) -> dict:
     log_path = Path("results") / f"train_{cfg.loss}.json"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(json.dumps({"cfg": {**asdict(cfg), "train_pt": str(cfg.train_pt), "val_pt": str(cfg.val_pt), "out_dir": str(cfg.out_dir)}, "log": log}, indent=2, default=str))
+    print(f"saved log -> {log_path}")
+    print(f"saved student -> {cfg.out_dir / f'student_{cfg.loss}'}")
     return log
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--loss", required=True, choices=["ce", "fkl", "rkl"])
+    ap.add_argument("--loss", required=True, choices=["ce", "fkl", "rkl", "gkd"])
     ap.add_argument("--teacher", default="/home/prannayk/models/qwen-coder-1.5b")
     ap.add_argument("--student", default="/home/prannayk/models/qwen-coder-0.5b")
     ap.add_argument("--train-pt", type=Path, default=Path("data/cache/train.pt"))
@@ -229,7 +284,7 @@ def main() -> None:
     ap.add_argument("--eval-every", type=int, default=500)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--grad-accum", type=int, default=2)
-    ap.add_argument("--lr", type=float, default=5e-5)
+    ap.add_argument("--lr", type=float, default=2e-5)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
