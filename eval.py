@@ -163,8 +163,12 @@ def spec_decode(
             p_s = F.softmax(s_logits / max(temperature, 1e-6), dim=-1)
             p_t = F.softmax(t_logits / max(temperature, 1e-6), dim=-1)
 
+            # if generate stopped early (EOS), only score actually-generated tokens
+            actual_drafted = draft.size(1) - cur.size(1)
             start = cur.size(1) - 1
-            tgt_positions = list(range(start, start + draft_len))
+            tgt_positions = list(range(start, start + actual_drafted))
+            if not tgt_positions:
+                break
             ratios = []
             for pos in tgt_positions:
                 tok_id = draft[0, pos + 1].item()
