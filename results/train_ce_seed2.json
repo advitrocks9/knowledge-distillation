@@ -1,0 +1,56 @@
+{
+  "cfg": {
+    "loss": "ce",
+    "teacher": "/home/prannayk/models/qwen-coder-1.5b",
+    "student": "/home/prannayk/models/qwen-coder-0.5b",
+    "train_pt": "data/cache/train.pt",
+    "val_pt": "data/cache/val.pt",
+    "out_dir": "checkpoints",
+    "steps": 2500,
+    "eval_every": 500,
+    "batch_size": 2,
+    "grad_accum": 4,
+    "lr": 2e-05,
+    "warmup": 100,
+    "temperature": 1.0,
+    "rollout_temperature": 1.0,
+    "rollout_prompt_len": 64,
+    "rollout_new": 64,
+    "seed": 2,
+    "log_every": 50
+  },
+  "log": {
+    "step": [
+      0,
+      500,
+      1000,
+      1500,
+      2000,
+      2500
+    ],
+    "train_loss": [
+      null,
+      1.3821784257888794,
+      1.0409019440412521,
+      1.033183827996254,
+      1.4743277728557587,
+      1.0154832303524017
+    ],
+    "val_nll": [
+      1.2846193275654236,
+      1.2732858463158931,
+      1.276819752820592,
+      1.2801576513989852,
+      1.2803264330285913,
+      1.2804043205765876
+    ],
+    "wallclock_s": [
+      0.0,
+      57.97952342033386,
+      113.55470180511475,
+      169.14625477790833,
+      218.75183153152466,
+      268.21954703330994
+    ]
+  }
+}
