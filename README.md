@@ -11,22 +11,36 @@ The student starts from the public Qwen2.5-Coder-0.5B base, not from random
 weights, so the comparison is "what does each loss buy on top of an already-
 pretrained student" -- the realistic distillation regime, not pretraining.
 
-## Headline numbers (full table in `report.md`)
+## Headline (full discussion in `report.md`)
 
-| run | NLL | HumanEval pass@1 | spec-decode K=4 |
-|---|---|---|---|
-| teacher 1.5B | 1.0725 | 0.427 | 3.984 / 4 |
-| student base | 1.2845 | 0.256 | 2.396 / 4 |
-| ce baseline | **1.2818** | **0.274** | 2.355 / 4 |
-| forward KL | 1.2870 | 0.268 | **2.518 / 4** |
-| reverse KL | 1.3328 | 0.262 | 2.390 / 4 |
-| GKD on-policy | 1.3181 | 0.268 | 2.446 / 4 |
+The final table after hardening the spec-decode evaluation (164 HumanEval
+prompts, K=4, sampled drafts at T=1.0, bootstrap-by-prompt 95% CIs):
 
-Each loss wins a different column. CE wins NLL and HumanEval by a small
-margin; forward KL wins the speculative-decoding draft acceptance metric (the
-one that maps onto inference latency for a code completion model); reverse KL
-wins nothing at this teacher size and training duration. Discussion in
-`report.md`.
+| run | mean accepted run / 4 | 95% CI |
+|---|---|---|
+| teacher 1.5B (self-spec sanity) | 3.980 | [3.968, 3.990] |
+| student base (no fine-tune) | 2.517 | [2.409, 2.624] |
+| student + ce  | 2.359 | [2.261, 2.457] |
+| student + fkl | 2.477 | [2.377, 2.583] |
+| student + rkl | **2.573** | [2.474, 2.684] |
+| student + gkd | 2.562 | [2.460, 2.658] |
+
+The two pairs whose CIs don't overlap, i.e. statistically distinguishable
+at 95%: `rkl > ce` and `gkd > ce`. Everything else is within noise.
+
+The first-pass eval (32 prompts, no CIs, in `results/eval.json`) had me
+write that forward KL won this column. That story didn't survive 164
+prompts. The actual finding is **reverse-KL distillation preserves
+teacher alignment significantly better than CE-only fine-tuning**;
+within the KL-distilled methods, the direction (forward vs reverse)
+isn't distinguishable at this teacher size. `report.md` walks through
+the iteration -- first-pass eval, codex review, hardened protocol,
+revised conclusion.
+
+HumanEval pass@1 numbers don't change between evals (deterministic
+greedy on 164 problems): teacher 0.427, base 0.256, all four distilled
+students 0.262-0.274 -- a one-problem-of-164 spread, well within noise.
+That column is too small to discriminate the methods.
 
 ## Run order
 

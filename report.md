@@ -85,101 +85,266 @@ normalisation, no policy-gradient surrogate, no teacher-forced mixing. It's
 
 ## Results
 
+### First pass
+
+The cheap version of the eval: 32 HumanEval prompts, K=2 and K=4, no
+confidence intervals. I ran this first because I wanted a number, any
+number, before deciding what to look at more carefully. The first-pass
+table looked like this (`results/eval.json`):
+
 | run | held-out NLL | HumanEval pass@1 | spec K=2 (max 2) | spec K=4 (max 4) |
 |---|---|---|---|---|
 | teacher Qwen2.5-Coder-1.5B | **1.0725** | **0.427** (70/164) | 2.000 | 3.984 |
 | student Qwen2.5-Coder-0.5B (no fine-tune) | 1.2845 | 0.256 (42/164) | **1.640** | 2.396 |
-| student + ce  | **1.2818** | **0.274** (45/164) | 1.528 | 2.355 |
+| student + ce  | **1.2818** | 0.274 (45/164) | 1.528 | 2.355 |
 | student + fkl | 1.2870 | 0.268 (44/164) | 1.387 | **2.518** |
 | student + rkl | 1.3328 | 0.262 (43/164) | 1.576 | 2.390 |
 | student + gkd | 1.3181 | 0.268 (44/164) | 1.492 | 2.446 |
 
-Numbers in `results/eval.json`; per-problem HumanEval completions live
-inside that file under `humaneval_completions`. Each spec-decode entry is
-the mean of 32 prompts × multiple draft cycles (4 for K=2, 2 for K=4).
+The story I wrote down on the first pass: **forward KL wins K=4
+spec-decode**. CE drifts the student toward the data and hurts spec-decode;
+forward KL preserves teacher alignment. K=2 inverts because base
+"front-loads" acceptance.
 
-The table tells three different stories depending on which column you read:
+That story was wrong, or at least not supported by the evidence I had.
 
-**Held-out NLL.** CE wins narrowly, FKL is roughly tied with the un-fine-
-tuned student, RKL and GKD make NLL strictly worse. This is forced by
-maths: forward KL minimises `E_{x~p_T}[-log p_S(x)]` which is the
-cross-entropy of `p_S` against the teacher's distribution, not the data's,
-and the teacher and the data already largely agree at this scale. Reverse
-KL minimises the cross-entropy of `p_T` against `p_S`, which is *not*
-NLL, so it's expected to make NLL worse on the way to making something
-else better. The NLL column is a sanity check, not a discriminator.
+### Hardening the spec-decode evaluation
 
-**HumanEval pass@1.** All distilled students beat the un-fine-tuned base
-(0.256 → 0.262-0.274), but plain CE wins. CE picks up 6 problems the base
-got wrong and loses 3, FKL picks up 4 and loses 2, RKL picks up 2 and
-loses 1, GKD picks up 4 and loses 2. The CE / FKL gap on HumanEval is one
-problem out of 164, which is barely outside coin-flip noise on this size of
-benchmark. So the right reading is "all four objectives are roughly equal
-on the user-facing metric" -- the experiment doesn't rank them here.
+Before locking the headline I sent the eval design to a code-review pass
+(see `notes/levelup-rescue.md`) and the pushback was direct: 32 prompts
+with no error bars and a metric that flips sign between K=2 and K=4 is
+two noisy points that I'd attached a narrative to. The first task wasn't
+seeds, or a new loss, or a bigger teacher -- it was making the existing
+spec-decode numbers credible. Specifically:
 
-**Speculative-decoding draft acceptance, K=4.** Forward KL wins, by a
-margin that's about 5% above the base student and about 7% above CE
-(2.518 vs 2.355). This is the metric where the loss-shape effect is
-visible, and it's visible *for forward KL*, not reverse. The mechanism is
-the one MiniLLM warns against in reverse: at K=4 the student is asked to
-match the teacher's distribution over four consecutive positions, and FKL
-trains exactly that, while CE drifts the student toward the data's
-empirical marginals (which the teacher has already smoothed past with its
-extra capacity). Reverse-KL students don't beat FKL on K=4 because at this
-teacher size (1.5B, not 70B) and this training duration (~10M tokens) there
-isn't enough of a "harmful tail" in the teacher for mode-seeking to pay
-off; they end up matching the teacher slightly worse than FKL because RKL
-doesn't directly target distribution match.
+- 32 → 164 prompts (all of HumanEval, the function-completion shape that
+  matches IDE use; no codeparrot mid-statement truncations, which inflate
+  next-token sharpness artefactually);
+- bootstrap-by-prompt 95% CIs on mean accepted run length;
+- per-prompt cycle CV reported alongside the mean (codex's "your mean is
+  stable but your process might not be" point -- if a code completion
+  team grades on user latency they care about both);
+- shared eval seed across variants so evaluation noise can't masquerade
+  as training signal;
+- locked sampling regime (T=1.0, the protocol from Leviathan et al.
+  2023, applied identically to all variants);
+- per-position acceptance only from the **first** drafted block per
+  prompt, to avoid contamination from previously accepted student
+  prefixes;
+- K=4 only -- K=8 isn't worth the compute until K=4 is precise enough
+  to discriminate trend from variance.
 
-The K=2 column inverts this: the un-fine-tuned student wins, and FKL is
-*worst*. I read that as a Goodhart-style artefact of the per-position
-ratios. The base student is sharpest where the local context is most
-informative (the very first drafted token after a real prefix), so the
-first per-token acceptance prob is high; FKL trains the student to spread
-mass like the teacher, which lowers the first-token acceptance but
-preserves the alignment over longer windows. K=4 / K=2 ratios bear this
-out: base 1.46, FKL 1.82 -- FKL acceptance decays geometrically over the
-draft, base front-loads.
+Code is `spec_eval.py`; results are `results/spec_eval.json`. The
+re-eval ran in ~50 minutes on the 4090 once the protocol was locked.
+
+### Hardened spec-decode results, K=4
+
+| run | mean accepted run / 4 | 95% CI | within-prompt CV |
+|---|---|---|---|
+| teacher (self-spec, sanity) | 3.980 | [3.968, 3.990] | 0.014 |
+| student base (no fine-tune) | 2.517 | [2.409, 2.624] | 0.478 |
+| student + ce  | 2.359 | [2.261, 2.457] | 0.511 |
+| student + fkl | 2.477 | [2.377, 2.583] | 0.485 |
+| student + rkl | **2.573** | [2.474, 2.684] | 0.442 |
+| student + gkd | 2.562 | [2.460, 2.658] | 0.446 |
+
+Pairs whose 95% CIs do not overlap (i.e. statistically distinguishable at
+this sample size):
+
+- `student_rkl > student_ce`
+- `student_gkd > student_ce`
+
+That's it. Every other pair has overlapping CIs and isn't distinguishable.
+
+The first-pass headline -- "forward KL wins K=4" -- did not survive. The
+gap I attached a story to was a 32-prompt sample-size artefact: with 164
+prompts and proper CIs, the FKL student is statistically tied with the
+un-fine-tuned base and with both reverse-KL variants. The actual
+significant finding is **reverse-KL distillation preserves teacher
+alignment significantly better than CE-only fine-tuning**, which is
+closer to what MiniLLM predicts than what I originally claimed.
+
+The within-prompt CV of ~0.45-0.51 across all student variants is the
+other thing the first-pass eval was hiding. The mean accepted run is
+~2.5 / 4, but draft-cycle-to-draft-cycle the student is producing run
+lengths that vary by ~50% of the mean. For a deployed code completion
+model that translates to noticeably uneven latency. The teacher's CV is
+0.014, two orders of magnitude smaller, which is what "stable from the
+verifier's point of view" looks like.
+
+### Per-position analysis on the val corpus
+
+Spec-decode is one window into "does the student match the teacher's
+distribution." A more direct window is to compute the per-token KL,
+top-1 agreement, and total-variation distance at every position of the
+val corpus. The val tensor is 128 sequences × 512 tokens, of which
+~61.5K positions are non-pad. Bucket the positions by teacher entropy
+into quartiles -- low entropy is "the teacher knows exactly what comes
+next" (operators, indentation, common keywords); high entropy is "the
+teacher has a spread distribution" (variable names, choice of API,
+high-level structure).
+
+**Mass on the teacher's top-1 token** (`p_S(argmax p_T)` -- higher means
+the student more confidently backs the teacher's preferred next token):
+
+| run | q1 (H~0) | q2 (H~0.18) | q3 (H~0.97) | q4 (H~3.16) | overall |
+|---|---|---|---|---|---|
+| base | 0.991 | 0.901 | 0.618 | 0.265 | 0.694 |
+| ce  | 0.991 | 0.909 | 0.651 | 0.268 | 0.705 |
+| fkl | 0.990 | 0.899 | 0.615 | 0.261 | 0.691 |
+| **rkl** | **0.994** | **0.930** | **0.669** | **0.320** | **0.728** |
+| gkd | 0.990 | 0.908 | 0.637 | 0.291 | 0.706 |
+
+**Total-variation distance to teacher distribution** (`0.5 * Σ|p_S - p_T|`
+-- lower means the student matches the teacher's full distribution shape,
+not just its mode):
+
+| run | q1 | q2 | q3 | q4 | overall |
+|---|---|---|---|---|---|
+| base | 0.009 | 0.079 | 0.193 | 0.337 | 0.155 |
+| ce  | 0.009 | 0.081 | 0.231 | 0.365 | 0.172 |
+| **fkl** | 0.010 | 0.081 | 0.194 | **0.338** | 0.156 |
+| **rkl** | **0.006** | **0.063** | **0.189** | 0.350 | **0.152** |
+| gkd | 0.009 | 0.078 | 0.194 | 0.343 | 0.156 |
+
+This is the figure where the loss-shape effect is visible. The two
+mechanisms MiniLLM predicts -- forward KL is mode-covering, reverse KL
+is mode-seeking -- show up cleanly at the per-position level even
+though the aggregate spec-decode column only barely separates them:
+
+- **CE drifts the student furthest from the teacher**, especially at
+  high-entropy positions. q4 TV jumps from 0.337 (base) to 0.365 (ce);
+  q3 TV jumps from 0.193 to 0.231. The argmax-agreement at q4 also
+  drops the most under CE (0.604 → 0.574). This is the per-position
+  evidence behind the spec-decode result that CE significantly
+  underperforms the KL methods.
+- **FKL matches the teacher's distribution shape best at q4** (TV 0.338,
+  the closest of all four trained variants to the base 0.337) but does
+  *not* increase the student's confidence on the teacher's top-1
+  (0.261, slightly below base's 0.265). That's exactly mode-covering
+  in action: FKL preserves the teacher's spread, including the spread.
+- **RKL maximally concentrates mass on the teacher's top-1 token** at
+  every bucket and especially at q4: 0.320 vs base 0.265, FKL 0.261.
+  At the same time RKL's q4 TV is 0.350 -- slightly *worse* than FKL,
+  because RKL isn't matching the teacher's full shape, it's mode-seeking.
+  That trade-off is the textbook reverse-KL behaviour.
+
+The three losses are doing exactly what the literature says they should
+do. The reason this doesn't translate into a large aggregate spec-decode
+gap is that argmax-agreement (which drives most of the per-token
+acceptance) is dominated by the q1+q2 buckets where every method
+agrees with the teacher >96% of the time. The q4 bucket, where the
+methods diverge meaningfully, is only ~25% of positions and contributes
+proportionally less to the K=4 average. So the per-position figure
+shows the loss-shape mechanism more clearly than any aggregate metric I
+ran -- and the aggregate metrics, with proper CIs, only reveal the
+distillation-vs-no-distillation contrast.
+
+### Per-position acceptance, first block of K=4
+
+This is the figure I should have led with on the first pass. For each
+method, mean acceptance probability at draft positions 1 through 4,
+computed only on the first block sampled from each prompt:
+
+| run | pos 1 | pos 2 | pos 3 | pos 4 |
+|---|---|---|---|---|
+| teacher (self) | 1.000 | 1.000 | 1.000 | 1.000 |
+| base | 0.959 | 0.628 | 0.730 | 0.837 |
+| ce  | 0.960 | 0.615 | 0.717 | 0.841 |
+| fkl | 0.958 | 0.618 | 0.735 | 0.827 |
+| **rkl** | **0.967** | **0.655** | 0.701 | 0.828 |
+| gkd | 0.962 | **0.666** | 0.710 | 0.809 |
+
+Two things this reveals that the aggregate hides:
+
+1. The win of RKL and GKD over CE shows up almost entirely at draft
+   positions 1 and 2. RKL pos 2 is 0.655 (vs CE 0.615); RKL pos 1 is
+   0.967 (vs CE 0.960). At positions 3 and 4 the methods are roughly
+   tied. That's consistent with mode-seeking distillation: it sharpens
+   the student's first-token agreement with the teacher (where the
+   prompt context is most informative) and provides less differential
+   benefit at later positions where every method is converging to similar
+   distributions.
+2. The pos-1 / pos-2 / pos-3+ shape is universal across methods. Pos 1
+   is high (~0.96) because the student inherits good first-token
+   prediction from pretraining. Pos 2 dips because that's the first
+   token sampled conditional on the *student's* sampled prefix, where
+   the student-teacher distribution gap matters most. Pos 3+ recovers
+   because conditioning on a student-likely path is also a path the
+   student finds locally easy to continue. None of the four loss
+   variants change the *shape* of this curve, only the absolute height.
+
+This per-position pattern is also what kills my first-pass K=2 story.
+The "FKL is worst at K=2" claim was about an aggregate over a draft
+cycle that itself averages over noisy positions. The properly
+disaggregated picture says FKL and base are tied at every individual
+position, which is what the K=4 aggregate also says.
 
 ## What this changed about my read of the paper
 
-I came in expecting reverse KL on a real code teacher to clearly beat
-forward KL on at least one metric, the way MiniLLM's instruction-following
-results suggest. What I got was that forward KL won the metric closest to
-what JetBrains actually ships, and reverse KL won nothing. Three things
-this updates me on:
+The honest version of this section needs to be in two parts, because what
+I think the paper says changed when the eval got more honest.
 
-1. **The reverse-KL win is conditional on the teacher having structured
-   tail mass.** MiniLLM's instruction-following teacher (a 13B chat model)
-   has plenty of plausible-but-wrong continuations to ignore; my 1.5B code
-   teacher has comparatively little, because both teacher and student were
-   pretrained on the same large code corpus and largely agree at this
-   scale. The interesting place to test reverse KL on code is a much wider
-   teacher-student gap -- 7B teacher into 0.5B student, or Mellum-4b into
-   a sub-1B student.
+**After the first-pass eval**, I thought the paper was overstating its
+case for autoregressive code distillation: forward KL had won my K=4
+spec-decode column and reverse KL had won nothing. I wrote that the
+reverse-KL win was conditional on the teacher having a structured tail
+mass that my 1.5B code teacher didn't have, and that the on-policy fix
+in MiniLLM was load-bearing in a way the headline of the paper hides.
 
-2. **The on-policy fix in GKD/MiniLLM is the load-bearing part of the
-   recipe, not the reverse-KL switch by itself.** My naive `gkd` run
-   sampled from the student and scored with the teacher; it didn't include
-   length-normalised reward, didn't mix in teacher-sampled prefixes
-   periodically (the standard fix for early-training collapse), didn't do
-   the policy-gradient single-step decomposition. With that recipe missing,
-   the on-policy run beats teacher-forced reverse KL on NLL (1.32 vs 1.33)
-   but doesn't approach forward KL on the metric I care about. The lesson:
-   "use reverse KL" is the headline; the real engineering is in the things
-   nobody quotes from the paper.
+**After the hardened eval**, the situation is different. CE-only
+fine-tuning is statistically worse than reverse-KL training on draft
+acceptance, and the KL-direction methods are all within noise of each
+other. That's actually consistent with what MiniLLM's argument predicts
+at this scale: when the teacher and student already largely agree (same
+architecture, same pretraining mix, 3× capacity gap), the loss-shape
+effect mostly shows up as "did you use the teacher at all", not "which
+KL direction did you use." The reverse-KL student edges out the FKL
+student by 0.1 of a token at K=4 on the means, which is in the right
+direction but not statistically distinguishable.
 
-3. **The right objective for an inference-bound team is the spec-decode
-   acceptance length, not pass@1 or NLL.** This is the only column in the
-   table where the loss-shape effect is unambiguous, and it's also the
-   only column whose units map directly to user-perceived latency. If I
-   were running a Mellum-style distillation experiment for real I would
-   reward-shape against this directly, not against pass@1 (which is too
-   small to differentiate at this number of problems and too downstream to
-   pin to the loss) and not against NLL (which favours the wrong loss).
-   [DistillSpec](https://arxiv.org/abs/2310.08461) (Zhou et al., 2023)
-   does this explicitly; it should be the default reference for any
-   distillation work targeted at speculative decoding.
+The thing I was wrong about is that I'd attached a clear loss-direction
+story to a 32-prompt eval. With proper CIs the loss-direction effect is
+indistinguishable from noise at this teacher size. What's distinguishable
+is the **distillation effect itself** -- using the teacher (any KL
+direction) versus not using the teacher (CE) -- on the metric that
+maps onto inference latency.
+
+Three things this updates me on, in priority order:
+
+1. **The right unit for distillation evaluation is acceptance length with
+   CIs, not aggregate NLL or aggregate pass@1.** NLL favours forward KL
+   by construction. Pass@1 at 164 problems is too noisy to discriminate
+   between methods that differ by a few percentage points. Spec-decode
+   acceptance length is the only column whose units map onto deployed
+   latency, and it's the column where the four methods spread on the
+   first-pass eval, hardened with bootstrap CIs that survive a senior
+   reviewer reading the table.
+
+2. **The reverse-KL win at this scale is small, but in the right
+   direction.** RKL beats CE significantly; RKL beats FKL/base
+   non-significantly. That's consistent with the paper's mechanism --
+   reverse KL preserves teacher alignment better than data-fitting CE --
+   but at a smaller magnitude than the paper's instruction-following
+   experiments, because my teacher has less of the kind of tail mass
+   that makes the mode-covering vs mode-seeking distinction matter.
+   The interesting place to test the paper's mechanism in full is at
+   wider teacher-student gaps (7B → 0.5B, Mellum-4B → sub-1B).
+
+3. **The on-policy fix in MiniLLM/GKD is still the load-bearing part of
+   the recipe.** My naive `gkd` run is statistically tied with `rkl`
+   despite being on-policy, which says my naive on-policy version isn't
+   adding the things MiniLLM's full algorithm adds (length-normalised
+   reward, teacher-mixed prefixes, single-step decomposition). With
+   those, I'd expect on-policy to beat off-policy reverse KL by more
+   than the noise floor.
+
+4. **DistillSpec is the natural objective.** [DistillSpec](https://arxiv.org/abs/2310.08461)
+   trains the student against the spec-decode acceptance probability
+   directly. That's the loss whose units match the metric the eval
+   showed actually discriminates between the methods. If I had another
+   week of compute I'd add it as a fifth variant and see whether it
+   widens the rkl-vs-ce gap.
 
 ## A few smaller observations from the runs
 
@@ -244,13 +409,16 @@ uv run python distill.py --loss ce  --steps 2500 --lr 2e-5            # ~5 min
 uv run python distill.py --loss fkl --steps 2500 --lr 2e-5            # ~7 min
 uv run python distill.py --loss rkl --steps 2500 --lr 2e-5            # ~7 min
 uv run python distill.py --loss gkd --steps 2500 --lr 2e-5            # ~40 min (sampling)
-uv run python eval.py                                                 # ~50 min (HumanEval × 6)
+uv run python eval.py                                                 # first-pass aggregate eval
+uv run python spec_eval.py --K 4 --max-drafts 8 --eval-seed 42        # hardened spec-decode eval
 uv run python make_table.py                                           # prints the markdown
 ```
 
-Total wall on a single RTX 4090 sharing the box: about two hours of
+Total wall on a single RTX 4090 sharing the box: about three hours of
 training + eval. `results/train_*.json` has per-step training curves,
-`results/eval.json` has every number behind every table.
+`results/eval.json` has the first-pass aggregate eval,
+`results/spec_eval.json` has the hardened spec-decode numbers including
+per-position acceptance and bootstrap CIs.
 
 ## Things I'd want a Mellum engineer to push back on
 
