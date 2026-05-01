@@ -28,14 +28,19 @@ prompts, K=4, sampled drafts at T=1.0, bootstrap-by-prompt 95% CIs):
 The two pairs whose CIs don't overlap, i.e. statistically distinguishable
 at 95%: `rkl > ce` and `gkd > ce`. Everything else is within noise.
 
+Three-seed retraining of CE and RKL (the pair that survived the
+single-seed eval) confirms the gap: CE mean 2.378 (seed std 0.008),
+RKL mean 2.584 (seed std 0.023), effect size ~12 pooled SDs. See
+`results/spec_eval_seeds.json`.
+
 The first-pass eval (32 prompts, no CIs, in `results/eval.json`) had me
 write that forward KL won this column. That story didn't survive 164
 prompts. The actual finding is **reverse-KL distillation preserves
 teacher alignment significantly better than CE-only fine-tuning**;
 within the KL-distilled methods, the direction (forward vs reverse)
 isn't distinguishable at this teacher size. `report.md` walks through
-the iteration -- first-pass eval, codex review, hardened protocol,
-revised conclusion.
+the iteration -- first-pass eval, review, hardened protocol, revised
+conclusion, then per-position analysis showing the loss-shape mechanism.
 
 HumanEval pass@1 numbers don't change between evals (deterministic
 greedy on 164 problems): teacher 0.427, base 0.256, all four distilled

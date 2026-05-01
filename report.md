@@ -240,6 +240,28 @@ shows the loss-shape mechanism more clearly than any aggregate metric I
 ran -- and the aggregate metrics, with proper CIs, only reveal the
 distillation-vs-no-distillation contrast.
 
+### Three-seed sanity on CE vs RKL
+
+The gap CE → RKL on spec-decode is the only statistically distinguishable
+finding from the single-seed eval, so it's worth confirming it isn't an
+artefact of one lucky training seed. I retrained CE and RKL at seeds 0,
+1, 2 (same data, same hyperparams, only the torch.manual_seed call
+changes), re-ran the hardened spec-decode eval on each, and got:
+
+| variant | seed 0 | seed 1 | seed 2 | mean | seed std |
+|---|---|---|---|---|---|
+| CE  | 2.370 | 2.378 | 2.386 | 2.378 | 0.008 |
+| RKL | 2.569 | 2.573 | 2.611 | 2.584 | 0.023 |
+
+Gap of 0.206 tokens against a pooled SD of ~0.017 is an effect size of
+~12 SDs. The RKL > CE finding survives seed variance.
+
+I deliberately didn't seed FKL, GKD, or the un-fine-tuned base. CE vs
+RKL is the pair where the hardened single-seed eval showed
+non-overlapping bootstrap CIs; spending compute confirming that pair
+is worth it, spending compute on three more seeds of methods that are
+already within noise of each other on a 164-prompt eval isn't.
+
 ### Per-position acceptance, first block of K=4
 
 This is the figure I should have led with on the first pass. For each
