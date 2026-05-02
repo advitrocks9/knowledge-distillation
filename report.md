@@ -242,34 +242,27 @@ shows the loss-shape mechanism more clearly than any aggregate metric I
 ran -- and the aggregate metrics, with proper CIs, only reveal the
 distillation-vs-no-distillation contrast.
 
-### An algebraic tangent: spec-decode acceptance is exactly 1 - TV
+### Why the per-position TV table predicts the spec-decode ranking
 
-Once I had the per-position table I realised the spec-decode column and
-the per-position TV column are close to algebraically the same number.
-The Leviathan et al. (2023) speculative-decoding rule says the
-per-token acceptance probability for a student-drafted token x is
-`min(1, p_T(x) / p_S(x))`. Sample x from the student, take the
-expectation:
+After computing the per-position TV table I had to double-check
+whether the spec-decode column and the TV column were measuring the
+same thing. They are, at the per-token level, by Corollary 3.6 of
+[Leviathan et al. (2023)](https://arxiv.org/abs/2211.17192): the per-token
+acceptance probability under speculative decoding is exactly
+`1 - TV(p_S, p_T)`. The proof is one step from the rule
+`min(1, p_T(x)/p_S(x))` and the standard identity
+`sum_x min(p, q) = 1 - TV(p, q)`. DistillSpec (Zhou et al. 2023, §3) uses
+this as the load-bearing identity for their training objective. I
+should have spotted that earlier in my own writeup; I was treating
+spec-decode and per-position TV as adjacent metrics rather than the
+same quantity in different units.
 
-```
-E_{x~p_S}[ min(1, p_T(x) / p_S(x)) ]
-  = sum_x p_S(x) * min(1, p_T(x) / p_S(x))
-  = sum_x min(p_S(x), p_T(x))
-  = 1 - TV(p_S, p_T)
-```
+What I think is actually mine -- the empirical operationalisation --
+is using the per-position TV measurements to retrospectively predict
+the spec-decode K=4 ranking. Equal-weight average of `1 - TV` across
+the four entropy buckets:
 
-That last identity is standard. So the per-token spec-decode acceptance
-probability equals `1 - TV(p_S || p_T)` exactly, position by position.
-The aggregate K=4 mean accepted run length is then a non-linear
-geometric compound of per-position acceptance probabilities along the
-draft (and also depends on how the draft conditions on student-sampled
-prefixes after position 1, which makes it not a clean closed-form).
-
-That gives me a way to predict the spec-decode ranking from the
-per-position TV table, without re-running spec-decode. Equal-weight
-average of `1 - TV` per bucket:
-
-| run | predicted per-token accept | observed K=4 / 4 |
+| run | predicted per-token accept (mean of 1 - TV per bucket) | observed K=4 / 4 |
 |---|---|---|
 | base | 0.846 | 0.629 |
 | ce  | 0.828 | 0.590 |
@@ -277,33 +270,40 @@ average of `1 - TV` per bucket:
 | rkl | **0.848** | **0.643** |
 | gkd | 0.844 | 0.641 |
 
-The predicted ranking matches the observed ranking exactly. The
-absolute gap is amplified by the geometric compound, but the order is
-preserved. So the per-position TV figure is structurally the same
-finding as the spec-decode K=4 column, just measured one level deeper
-(per-position rather than per-draft-cycle), and it explains why the
-hardened spec-decode eval ranks the methods the way it does.
+The predicted and observed rankings match. **Important caveat I owe a
+careful reader**: equal-weight averaging across buckets is the wrong
+quantity for K=4. The right quantity is survival-weighted -- the K=4
+expected accepted run depends on `β_1 + β_1·β_2 + β_1·β_2·β_3 +
+β_1·β_2·β_3·β_4` with `β_i` the conditional acceptance at position i.
+Two methods with the same mean per-token acceptance can have different
+K=4 numbers if their β profile across positions differs. The fact that
+the predicted ranking matches the observed one in this experiment is
+empirically reassuring but not guaranteed by the math, and the
+per-position acceptance figure earlier in this writeup is what
+actually shows the β profile is roughly position-stationary (pos 1 ~
+0.96, pos 2 ~ 0.62, pos 3 ~ 0.72, pos 4 ~ 0.83 -- methods agree on
+shape, only the absolute height varies). For a method that put most
+of its acceptance budget at pos 4, the equal-weight prediction would
+miss it. Worth saying out loud rather than burying.
 
-The slightly subtler point is that **the literature gives forward KL
-all the credit for matching teacher distributions, and forward KL is
-the cleanest minimiser of TV via Pinsker's inequality** (`TV ≤
-sqrt(KL(p_T || p_S) / 2)`), but at this scale forward KL doesn't win
-the TV column either. The reason is capacity-bound: when the student
-can't match the teacher's full distribution shape, forward KL spreads
-the available probability mass across all of the teacher's support
-including places the teacher is itself uncertain, while reverse KL
-mode-collapses onto the teacher's high-density regions. For a corpus
-where most positions are low-entropy and the multimodality is
-concentrated at a small fraction of high-entropy positions, the second
-strategy gives lower aggregate TV. That's the per-position TV table
-above (RKL wins q1-q3, loses q4) put into a single sentence: most
-positions live where reverse KL's mode-seeking is the right strategy.
-
-This is a small theoretical observation that I haven't seen written
-down in the distillation papers I read for this project, though I
-haven't done a full survey. It's also the cleanest justification I have
-for why RKL beats CE significantly on spec-decode: reverse KL minimises
-mean TV, and mean TV directly determines per-token acceptance.
+The subtler thing the per-position TV table reveals -- this part is
+mine -- is **why FKL doesn't win the TV column despite Pinsker's
+inequality saying it should**. Forward KL is the standard cleanest
+minimiser of TV (`TV ≤ sqrt(KL(p_T || p_S) / 2)`), and the literature
+gives it credit accordingly. At this scale FKL still doesn't win mean
+TV. The reason is capacity: when the student can't match the teacher's
+full distribution exactly, forward KL has to spread the available
+probability mass across all of the teacher's support, including
+positions where the teacher is itself uncertain (the q4 bucket).
+Reverse KL mode-collapses onto the teacher's high-density regions,
+giving very low TV at q1-q3 (where the teacher is sharp and mode-
+collapsing is the right strategy) at the cost of slightly higher TV
+at q4 (where the teacher is spread and mode-collapsing is wrong). For
+the val-corpus position distribution -- 75% low-entropy positions, 25%
+high-entropy -- the second strategy wins on aggregate. That's what the
+per-position TV table is showing in one sentence: **the right loss
+direction depends on what fraction of your positions are mode-seekable
+versus mode-coverable, and Python source has more of the former**.
 
 ### Three-seed sanity on CE vs RKL
 
