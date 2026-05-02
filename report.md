@@ -1,11 +1,13 @@
 # Forward vs reverse KL when distilling a code model
 
 I read MiniLLM (Gu et al., ICLR 2024) and wanted to know whether its
-reverse-KL claim survives contact with a real code teacher and student. The
-short answer, after running 1.5B → 0.5B Qwen2.5-Coder distillation on Python
-source under four loss variants, is that the metric you grade on flips the
-ranking, and the metric that matters most for an inference-bound team is
-the one nobody in the literature reports.
+reverse-KL claim survives contact with a real code teacher and student.
+This is a writeup of what I built (1.5B → 0.5B Qwen2.5-Coder distillation
+on Python, four loss variants, three eval axes) and what changed about
+my read of the paper after I made the eval honest enough to disagree
+with my first-pass conclusion. Both directions matter: the eval got
+better, the conclusion flipped, and the paper turned out to be more
+right than I gave it credit for on my first reading.
 
 ## The paper, in one paragraph
 
@@ -393,34 +395,71 @@ Three things this updates me on, in priority order:
   but a real run would want to deduplicate by file hash plus a near-dup
   filter before tokenising.
 
-## What I'd do with another week
+## In flight: Mellum-as-teacher seq-KD
+
+The most obvious gap in this writeup is that I keep talking about
+Mellum and never use it. The follow-up I'd built code for and was
+running when the GPU box went unreachable mid-eval is a cross-tokenizer
+sequence-level distillation: have Mellum-4b-sft-python generate FIM
+completions on a Python corpus, retokenize the text in Qwen's tokenizer,
+and SFT Qwen2.5-Coder-0.5B on (prefix, mellum-middle, suffix) with loss
+masked to the middle. This is Kim & Rush 2016 style seq-KD; once
+tokenizers don't match, you can't do logit distillation, only
+pseudo-labelling.
+
+The conditions I designed (after a code-review pass; see
+`notes/levelup2-rescue.md`):
+
+- `base`            -- untouched Qwen with the FIM prompt format. Lower
+  bound.
+- `fim_gold`        -- SFT on real (prefix, ground-truth-middle, suffix)
+  triples. The mandatory control. Without it I can't tell whether any
+  improvement comes from Mellum or just from teaching Qwen the FIM task
+  format.
+- `fim_mellum`      -- SFT on Mellum-generated middles. The seq-KD condition.
+- `fim_mix`         -- 50/50 mix of gold and mellum middles. Tests
+  whether teacher guidance helps without forcing full imitation.
+- Mellum itself     -- upper bound on the same eval.
+
+Eval is HumanEval Infilling (the metric Mellum's own card reports:
+0.6621 / 0.3852 / 0.2970 single / multi / random for the base model)
+plus a held-out codeparrot-FIM exact-match check, plus a non-FIM
+HumanEval pass@1 regression to make sure FIM-tuning doesn't hurt
+left-to-right completion. Code is `fim_data.py`, `fim_generate.py`,
+`fim_train.py`, `fim_eval.py`, `humaneval_infilling.py`. The runner
+script `run_fim_experiment.sh` ties it together.
+
+What a null result looks like (so I can read the table honestly when it
+runs): `fim_gold > base` but `fim_mellum ≈ fim_gold` would say "the
+lever is FIM adaptation, not distillation from Mellum specifically."
+That's still a result. `fim_mellum > fim_gold` would be the
+interview-grade outcome -- cross-tokenizer transfer working. `fim_mellum
+< fim_gold` would say tokenizer mismatch / teacher-text noise dominates.
+In either case I'd want to verify on RepoBench-Python that FIM tuning
+hasn't broken left-to-right completion, since the public Mellum number
+of `Avg ≤ 8k = 0.299` is a regression check Mellum-the-team must already
+do.
+
+## What I'd do with another week beyond that
 
 In rough order of expected payoff:
 
-1. **Length-normalised reward**, the actual MiniLLM section 3.3 algorithm.
-   Naive on-policy drifts because teacher reward at long rollouts is
-   dominated by easy positions; length-normalising stops the student
-   collapsing onto whichever mode the teacher rewards on average. That's
-   the cheapest single change with the biggest expected effect on the
-   reverse-KL ranking.
+1. **Length-normalised reward** in the on-policy reverse KL, the actual
+   MiniLLM section 3.3 algorithm. Naive on-policy drifts because
+   teacher reward at long rollouts is dominated by easy positions;
+   length-normalising stops the student collapsing onto whichever mode
+   the teacher rewards on average. The cheapest single change with the
+   biggest expected effect on the reverse-KL ranking.
 
-2. **A bigger teacher gap.** 1.5B → 0.5B is 3×. The reverse-KL effect is
-   sharper at 7B → 0.5B or larger. Qwen2.5-Coder-7B-Instruct as a teacher
-   into the same 0.5B student is the same-tokenizer drop-in. About 14GB
-   for the teacher, doable on a 4090 with the rest offloaded.
+2. **DistillSpec.** Train against the per-token acceptance probability
+   under the spec-decode rule directly, with a stop-gradient through the
+   teacher. That's the loss whose units match the metric the eval
+   actually discriminates on.
 
-3. **Distil for spec-decode acceptance directly.** DistillSpec's actual
-   loss is the per-token acceptance probability under the spec-decode
-   rule, with a stop-gradient through the teacher. That's the loss whose
-   units match the metric I'd actually grade on.
-
-4. **FIM-aware distillation.** Mellum is FIM-trained
-   (`<fim_prefix>`/`<fim_middle>`/`<fim_suffix>`) and code completion is
-   inherently a FIM task. Standard distillation runs the same loss at
-   every position; an obvious refinement is to weight the loss towards
-   the `<fim_middle>` segment, which is what users actually accept. None
-   of the public distillation papers I read run this ablation and it's
-   the place where the JetBrains-specific signal probably lives.
+3. **A bigger teacher gap inside the Qwen family.** 1.5B → 0.5B is 3×;
+   the reverse-KL effect should sharpen at 7B → 0.5B. Same-tokenizer
+   drop-in. (I deliberately skipped this for now because it doesn't
+   bring the experiment closer to Mellum, just sharpens the proxy.)
 
 ## How to repro
 
@@ -444,11 +483,12 @@ per-position acceptance and bootstrap CIs.
 
 ## Things I'd want a Mellum engineer to push back on
 
-1. Is the "forward KL wins K=4 spec-decode at 1.5B teacher" result still
-   true at 4B? My intuition is yes -- nothing about the mechanism scales
-   the wrong way -- but the gap to reverse KL might invert if the 4B
-   teacher has the kind of structured tail mass MiniLLM's argument
-   relies on.
+1. The reverse-KL effect I see is small at 1.5B → 0.5B and only shows
+   significantly against the CE baseline. The per-position figure says
+   the mechanism is alive but the q4 bucket (where it lives) is only
+   a quarter of positions, so it gets diluted. At 4B → sub-1B with a
+   bigger entropy gap, does the q4 effect cleanly dominate, or do you
+   see the same "swamped by easy positions" problem?
 2. Is spec-decode draft length the right student-side metric for Mellum's
    actual deployment? My read of the public posts is that Mellum stands
    alone (no separate verifier model in the IDE), so the latency lever
@@ -459,7 +499,8 @@ per-position acceptance and bootstrap CIs.
    user-facing telemetry measures.
 3. How much of Mellum's quality is the distillation objective vs the data
    curation and the FIM training? The public posts emphasise data and
-   FIM; my experiment suggests the distillation lever exists but is
-   smaller than a recipe choice (CE vs FKL on HumanEval is one problem
-   out of 164). I'd like to know which side of "distillation matters"
-   the team's internal numbers fall on.
+   FIM. My result that "any KL distillation > CE" is a small effect
+   that survives statistical rigour but is much smaller than the
+   teacher-student capability gap (HumanEval pass@1 0.427 vs 0.274), so
+   the lever I observe is real but bounded. I'd like to know whether
+   internal numbers say the same.
