@@ -258,33 +258,43 @@ spec-decode and per-position TV as adjacent metrics rather than the
 same quantity in different units.
 
 What I think is actually mine -- the empirical operationalisation --
-is using the per-position TV measurements to retrospectively predict
-the spec-decode K=4 ranking. Equal-weight average of `1 - TV` across
-the four entropy buckets:
+is using the per-position acceptance β_i (which is `1 - TV` at each
+draft position) to predict the K=4 ranking via the right formula. The
+expected accepted run length is the survival-weighted compound
+`E[run/K] = (1/K) * sum_{i=1..K} prod_{j=1..i} β_j`. Equal-weight
+average of β across positions is *not* the right quantity -- two
+methods with the same mean β can have different K=4 numbers if one
+puts its acceptance budget early and the other puts it late. The
+correct survival-weighted prediction is in `analyses/predict_specdecode.py`:
 
-| run | predicted per-token accept (mean of 1 - TV per bucket) | observed K=4 / 4 |
-|---|---|---|
-| base | 0.846 | 0.629 |
-| ce  | 0.828 | 0.590 |
-| fkl | 0.844 | 0.619 |
-| rkl | **0.848** | **0.643** |
-| gkd | 0.844 | 0.641 |
+| run | β1 | β2 | β3 | β4 | predicted E[run/4] | observed run/4 |
+|---|---|---|---|---|---|---|
+| teacher | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.995 |
+| base | 0.959 | 0.628 | 0.730 | 0.837 | 0.592 | 0.629 |
+| ce  | 0.960 | 0.615 | 0.717 | 0.841 | 0.582 | 0.590 |
+| fkl | 0.958 | 0.618 | 0.735 | 0.827 | 0.586 | 0.619 |
+| rkl | 0.967 | 0.655 | 0.701 | 0.828 | 0.603 | 0.643 |
+| gkd | 0.962 | 0.666 | 0.710 | 0.809 | **0.607** | 0.640 |
 
-The predicted and observed rankings match. **Important caveat I owe a
-careful reader**: equal-weight averaging across buckets is the wrong
-quantity for K=4. The right quantity is survival-weighted -- the K=4
-expected accepted run depends on `β_1 + β_1·β_2 + β_1·β_2·β_3 +
-β_1·β_2·β_3·β_4` with `β_i` the conditional acceptance at position i.
-Two methods with the same mean per-token acceptance can have different
-K=4 numbers if their β profile across positions differs. The fact that
-the predicted ranking matches the observed one in this experiment is
-empirically reassuring but not guaranteed by the math, and the
-per-position acceptance figure earlier in this writeup is what
-actually shows the β profile is roughly position-stationary (pos 1 ~
-0.96, pos 2 ~ 0.62, pos 3 ~ 0.72, pos 4 ~ 0.83 -- methods agree on
-shape, only the absolute height varies). For a method that put most
-of its acceptance budget at pos 4, the equal-weight prediction would
-miss it. Worth saying out loud rather than burying.
+The survival-weighted ranking is `gkd > rkl > base > fkl > ce`. The
+observed ranking is `rkl > gkd > base > fkl > ce`. The top two swap
+between predicted and observed -- the gap between RKL and GKD is small
+in both (0.004 in predicted, 0.003 in observed) and inside the
+spec-decode bootstrap CIs that overlap heavily. So the survival-
+weighted prediction matches observed to within tied positions.
+
+Two real surprises in this table: predictions are systematically
+*lower* than observed (CE 0.582 vs 0.590, RKL 0.603 vs 0.643). That's
+the opposite of what I expected. My naive intuition was that later
+draft cycles are conditioned on student-sampled prefixes that have
+drifted from the teacher, so β at later cycles should be lower than
+first-cycle β -- and the prediction uses first-cycle β only. The data
+say the opposite: later cycles have higher β. The plausible
+explanation is that the spec-decode advance step pushes the prefix
+towards positions where the student is highly confident locally
+(end-of-line, closing brackets, etc.), and those positions have very
+high acceptance even when the student-teacher distribution diverges
+elsewhere. I haven't run a confirmatory experiment for this yet.
 
 The subtler thing the per-position TV table reveals -- this part is
 mine -- is **why FKL doesn't win the TV column despite Pinsker's
