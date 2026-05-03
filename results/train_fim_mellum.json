@@ -1,0 +1,43 @@
+{
+  "args": {
+    "middle": "mellum",
+    "student": "/models/qwen-coder-0.5b",
+    "data": "data/fim/mellum_completions.jsonl",
+    "out_dir": "checkpoints",
+    "steps": 1200,
+    "lr": 2e-05,
+    "batch_size": 2,
+    "grad_accum": 4,
+    "seq_len": 512,
+    "seed": 0,
+    "eval_every": 300,
+    "log_every": 50,
+    "warmup": 100
+  },
+  "log": {
+    "step": [
+      300,
+      600,
+      900,
+      1200
+    ],
+    "train_loss": [
+      1.3142547011375427,
+      0.1895615616813302,
+      0.9178829118609428,
+      0.5999736525118351
+    ],
+    "val_middle_nll": [
+      0.9585440183207936,
+      1.0067963495741796,
+      1.0419002449425467,
+      1.044387573047276
+    ],
+    "wallclock_s": [
+      48.20453119277954,
+      95.31124019622803,
+      142.49807453155518,
+      189.71285462379456
+    ]
+  }
+}

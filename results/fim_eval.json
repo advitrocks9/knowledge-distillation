@@ -1,0 +1,86 @@
+{
+  "base": {
+    "name": "base",
+    "elapsed_s": 271.3548164367676,
+    "single_line": {
+      "n": 60,
+      "exact_match": 0.35,
+      "mean_middle_nll": 1.0447594941515916
+    },
+    "multi_line": {
+      "n": 60,
+      "exact_match": 0.0,
+      "mean_middle_nll": 0.9185098249167499
+    },
+    "random_span": {
+      "n": 60,
+      "exact_match": 0.016666666666666666,
+      "mean_middle_nll": 1.0769518319443392
+    },
+    "overall_em": 0.12222222222222222,
+    "overall_middle_nll": 1.0134070503375603
+  },
+  "fim_gold": {
+    "name": "fim_gold",
+    "elapsed_s": 127.55385136604309,
+    "single_line": {
+      "n": 60,
+      "exact_match": 0.36666666666666664,
+      "mean_middle_nll": 0.8615314863017608
+    },
+    "multi_line": {
+      "n": 60,
+      "exact_match": 0.06666666666666667,
+      "mean_middle_nll": 0.9423291474499702
+    },
+    "random_span": {
+      "n": 60,
+      "exact_match": 0.016666666666666666,
+      "mean_middle_nll": 1.0913561773164158
+    },
+    "overall_em": 0.15,
+    "overall_middle_nll": 0.965072270356049
+  },
+  "fim_mellum": {
+    "name": "fim_mellum",
+    "elapsed_s": 146.29609966278076,
+    "single_line": {
+      "n": 60,
+      "exact_match": 0.38333333333333336,
+      "mean_middle_nll": 0.9330595602265312
+    },
+    "multi_line": {
+      "n": 60,
+      "exact_match": 0.08333333333333333,
+      "mean_middle_nll": 0.9779813514774466
+    },
+    "random_span": {
+      "n": 60,
+      "exact_match": 0.0,
+      "mean_middle_nll": 1.143429530808517
+    },
+    "overall_em": 0.15555555555555556,
+    "overall_middle_nll": 1.0181568141708317
+  },
+  "fim_mix": {
+    "name": "fim_mix",
+    "elapsed_s": 140.7507345676422,
+    "single_line": {
+      "n": 60,
+      "exact_match": 0.4,
+      "mean_middle_nll": 0.8586456617157653
+    },
+    "multi_line": {
+      "n": 60,
+      "exact_match": 0.08333333333333333,
+      "mean_middle_nll": 0.9586596305134596
+    },
+    "random_span": {
+      "n": 60,
+      "exact_match": 0.0,
+      "mean_middle_nll": 1.1065609618364398
+    },
+    "overall_em": 0.16111111111111112,
+    "overall_middle_nll": 0.9746220846885549
+  }
+}
