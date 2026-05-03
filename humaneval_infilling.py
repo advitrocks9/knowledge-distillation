@@ -1,31 +1,38 @@
 """
 HumanEval Infilling eval -- the metric Mellum's own model card reports.
 
-Mellum-4b-base reports:
-  Single-Line:  66.21%
-  Multi-Line:   38.52%
-  Random Span:  29.70%
+Mellum-4b-base reports (as of April 2026 model card):
+  Single-Line: 0.6621
+  Multi-Line:  0.3852
+  Random Span: 0.2970
 
-(JetBrains/Mellum-4b-base model card, accessed 2026-04-30.)
+Bavarian et al. 2022 introduced the dataset; loubnabnl/humaneval_infilling
+on HF mirrors it. Three configs (SingleLine 1033 / MultiLine 5815 /
+RandomSpan 1640 examples). Each example gives prefix + suffix; the model
+infills the middle. pass@1 is computed by running the original test against
+the reconstructed solution.
 
-Mellum-4b-sft-python reports the RepoBench numbers
-(Avg ≤ 8k = 0.299, 8k = 0.298) per the same source.
+Notes on this script:
 
-The HumanEval Infilling dataset (Bavarian et al., 2022) carves three subsets
-out of the standard HumanEval problems by masking different kinds of spans
-in the canonical solution. The infilling setup gives the model a prefix and
-a suffix and asks for the span between them. Pass@1 is computed by running
-the original test against the reconstructed solution.
+  - I sub-sample each config to keep modal compute under budget. Running
+    the full 8488 problems × 5 models would be ~12h on A10G; 100 problems
+    per config keeps it under an hour while still giving a defensible
+    sample size with the caveats stated in the report.
 
-This script puts all four students -- base, fim_gold, fim_mellum, fim_mix --
-on the same eval, plus Mellum itself as the upper bound.
+  - Need datasets==3.6.0 with trust_remote_code=True because the dataset
+    uses a loader script that newer datasets versions deprecated.
+
+  - Mellum uses its own FIM tokens (<fim_prefix>, <fim_suffix>,
+    <fim_middle> in SPM order); Qwen2.5-Coder uses <|fim_prefix|>,
+    <|fim_suffix|>, <|fim_middle|> in PSM order. Both models are
+    FIM-pretrained so the embeddings are warm. The script picks the right
+    template per model.
 """
 
 from __future__ import annotations
 from pathlib import Path
 import argparse
 import json
-import signal
 import subprocess
 import sys
 import time
@@ -36,7 +43,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from fim_train import get_qwen_fim_tokens
 
 
-SUBSETS = ["single-line", "multi-line", "random-span"]
+SUBSETS = {
+    "single_line": "HumanEval-SingleLineInfilling",
+    "multi_line":  "HumanEval-MultiLineInfilling",
+    "random_span": "HumanEval-RandomSpanInfilling",
+}
 
 
 def build_qwen_fim(prefix: str, suffix: str, tok, fim) -> torch.Tensor:
@@ -51,15 +62,13 @@ def build_qwen_fim(prefix: str, suffix: str, tok, fim) -> torch.Tensor:
 
 
 def build_mellum_fim(prefix: str, suffix: str, tok) -> torch.Tensor:
-    # Mellum's SPM order: <fim_suffix> suffix <fim_prefix> prefix <fim_middle>
     prompt = f"<fim_suffix>{suffix}<fim_prefix>{prefix}<fim_middle>"
     return tok(prompt, return_tensors="pt").input_ids
 
 
 def truncate_completion(text: str) -> str:
-    """Cut at the first sign the model has finished the infill: a blank line
-    followed by something at column 0, or another fim/eos token."""
-    for stop in ["<|endoftext|>", "<|fim_pad|>", "<fim_pad>"]:
+    """Cut at the first sign the model has finished the infill."""
+    for stop in ["<|endoftext|>", "<|fim_pad|>", "<fim_pad>", "<file_sep>", "<filename>"]:
         idx = text.find(stop)
         if idx != -1:
             text = text[:idx]
@@ -87,14 +96,22 @@ def eval_subset(
     tok,
     fim,
     is_mellum: bool,
-    subset: str,
+    subset_key: str,
     n_problems: int,
     max_new: int,
     device,
+    seed: int,
 ) -> dict:
-    ds = load_dataset("loubnabnl/humaneval_infilling", subset.replace("-", "_") + "_infilling", split="test")
-    if n_problems and n_problems < len(ds):
-        ds = ds.select(range(n_problems))
+    config_name = SUBSETS[subset_key]
+    ds = load_dataset("loubnabnl/humaneval_infilling", config_name, split="test", trust_remote_code=True)
+    # deterministic subsample by seed for cross-model comparability
+    import random
+    rng = random.Random(seed)
+    indices = list(range(len(ds)))
+    rng.shuffle(indices)
+    indices = indices[:n_problems]
+    ds = ds.select(indices)
+
     n_pass = 0
     rows: list[dict] = []
     t0 = time.time()
@@ -119,7 +136,8 @@ def eval_subset(
         rows.append({"task_id": ex["task_id"], "passed": passed, "completion": gen[:200]})
     elapsed = time.time() - t0
     return {
-        "subset": subset,
+        "subset": subset_key,
+        "config": config_name,
         "n": len(rows),
         "pass@1": n_pass / max(len(rows), 1),
         "elapsed_s": elapsed,
@@ -129,7 +147,7 @@ def eval_subset(
 
 def evaluate(
     name: str, path: str, n_problems: int, max_new: int,
-    base_tok_path: str, device,
+    base_tok_path: str, device, seed: int,
 ) -> dict:
     is_mellum = "mellum" in name.lower() and "fim_mellum" not in name.lower()
     if is_mellum:
@@ -142,10 +160,10 @@ def evaluate(
     model.eval()
     print(f"\n=== {name} ({path}) ===")
     out = {"name": name, "ckpt": path, "subsets": {}}
-    for subset in SUBSETS:
-        r = eval_subset(name, model, tok, fim, is_mellum, subset, n_problems, max_new, device)
-        out["subsets"][subset] = r
-        print(f"  {subset}: pass@1 = {r['pass@1']:.3f}  (n={r['n']}, {r['elapsed_s']:.0f}s)")
+    for subset_key in SUBSETS:
+        r = eval_subset(name, model, tok, fim, is_mellum, subset_key, n_problems, max_new, device, seed)
+        out["subsets"][subset_key] = r
+        print(f"  {subset_key}: pass@1 = {r['pass@1']:.3f}  (n={r['n']}, {r['elapsed_s']:.0f}s)")
     overall = sum(out["subsets"][s]["pass@1"] for s in SUBSETS) / 3
     out["mean_pass@1"] = overall
     print(f"  mean pass@1: {overall:.3f}")
@@ -160,8 +178,10 @@ def main() -> None:
     ap.add_argument("--ckpt-dir", type=Path, default=Path("checkpoints"))
     ap.add_argument("--mellum", default="/home/prannayk/models/mellum-sft-python")
     ap.add_argument("--out", type=Path, default=Path("results/humaneval_infilling.json"))
-    ap.add_argument("--n-problems", type=int, default=164)
-    ap.add_argument("--max-new", type=int, default=256)
+    ap.add_argument("--n-problems", type=int, default=100,
+                    help="problems per subset; full set is 1033/5815/1640 -- defaults to a 100-per-subset subsample with a fixed seed")
+    ap.add_argument("--max-new", type=int, default=128)
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
     device = torch.device("cuda")
@@ -172,12 +192,12 @@ def main() -> None:
         ("fim_mix",     str(args.ckpt_dir / "student_fim_mix")),
         ("mellum_4b",   args.mellum),
     ]
-    out: dict = {}
+    out: dict = {"args": {"n_problems_per_subset": args.n_problems, "max_new": args.max_new, "seed": args.seed}}
     for name, path in runs:
         if not Path(path).exists():
             print(f"missing {path}, skip")
             continue
-        out[name] = evaluate(name, path, args.n_problems, args.max_new, args.student_base, device)
+        out[name] = evaluate(name, path, args.n_problems, args.max_new, args.student_base, device, args.seed)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(out, indent=2))
