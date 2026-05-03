@@ -56,6 +56,35 @@ def generate_one(
     return text
 
 
+@torch.no_grad()
+def generate_batch(
+    teacher: torch.nn.Module,
+    tok,
+    examples: list[dict],
+    max_new: int,
+    device: torch.device,
+    greedy: bool,
+) -> list[str]:
+    """Batched generation for speed. Pads to max input length in the batch."""
+    prompts = [build_mellum_fim_prompt(ex["prefix"], ex["suffix"], tok) for ex in examples]
+    enc = tok(prompts, return_tensors="pt", truncation=True, max_length=1536, padding=True)
+    ids = enc.input_ids.to(device)
+    attn = enc.attention_mask.to(device)
+    eos_id = tok.eos_token_id
+    out = teacher.generate(
+        ids,
+        attention_mask=attn,
+        max_new_tokens=max_new,
+        do_sample=not greedy,
+        temperature=0.0 if greedy else 0.7,
+        pad_token_id=eos_id,
+        eos_token_id=eos_id,
+    )
+    new_ids = out[:, ids.size(1):]
+    texts = tok.batch_decode(new_ids, skip_special_tokens=True)
+    return texts
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--teacher", default="/home/prannayk/models/mellum-sft-python")
@@ -66,6 +95,8 @@ def main() -> None:
                     help="greedy decoding (codex prefers this for seq-KD targets at first)")
     ap.add_argument("--limit", type=int, default=0,
                     help="limit number of examples to generate (0 = all)")
+    ap.add_argument("--batch-size", type=int, default=4,
+                    help="batched generation; pads to longest in batch")
     args = ap.parse_args()
 
     device = torch.device("cuda")
@@ -82,28 +113,40 @@ def main() -> None:
 
     args.out_jsonl.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
+    bs = args.batch_size
+    if tok.pad_token_id is None:
+        tok.pad_token = tok.eos_token
+    if tok.padding_side != "left":
+        tok.padding_side = "left"
     with args.out_jsonl.open("w") as out_f:
-        for i, ex in enumerate(examples):
+        for start in range(0, len(examples), bs):
+            chunk = examples[start : start + bs]
             try:
-                gen = generate_one(
-                    teacher, tok,
-                    prefix=ex["prefix"],
-                    suffix=ex["suffix"],
+                gens = generate_batch(
+                    teacher, tok, chunk,
                     max_new=args.max_new,
                     device=device,
                     greedy=args.greedy,
                 )
             except Exception as e:
-                print(f"  ex {i} failed: {e!r}; skipping")
-                continue
-            row = dict(ex)
-            row["mellum_middle"] = gen
-            row["mellum_middle_len_chars"] = len(gen)
-            out_f.write(json.dumps(row) + "\n")
-            if (i + 1) % 50 == 0:
-                rate = (i + 1) / (time.time() - t0)
-                eta = (len(examples) - i - 1) / max(rate, 1e-6)
-                print(f"  {i+1}/{len(examples)}  rate={rate:.1f}/s  eta={eta:.0f}s")
+                print(f"  batch {start} failed: {e!r}; falling back to per-example")
+                gens = []
+                for ex in chunk:
+                    try:
+                        gens.append(generate_one(teacher, tok, ex["prefix"], ex["suffix"],
+                                                  args.max_new, device, args.greedy))
+                    except Exception as e2:
+                        print(f"    inner fail: {e2!r}")
+                        gens.append("")
+            for ex, gen in zip(chunk, gens):
+                row = dict(ex)
+                row["mellum_middle"] = gen
+                row["mellum_middle_len_chars"] = len(gen)
+                out_f.write(json.dumps(row) + "\n")
+            done = start + len(chunk)
+            rate = done / max(time.time() - t0, 1e-6)
+            eta = (len(examples) - done) / max(rate, 1e-6)
+            print(f"  {done}/{len(examples)}  rate={rate:.2f}/s  eta={eta:.0f}s")
 
     print(f"wrote {args.out_jsonl}  ({time.time()-t0:.0f}s)")
 
