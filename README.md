@@ -87,22 +87,28 @@ run_fim_experiment.sh  local-GPU runner; modal_app.py is the cloud-GPU runner
 
 The Mellum-as-teacher follow-up did run, on Modal A10G after the lab
 GPU box went unreachable -- 600 codeparrot examples, three students
-(`fim_gold` / `fim_mellum` / `fim_mix`), evaluated on held-out
-codeparrot FIM exact-match and HumanEval Infilling pass@1 across all
-three subsets at 164 problems per subset. Headline:
+(`fim_gold` / `fim_mellum` / `fim_mix`), evaluated on three columns:
+held-out codeparrot FIM exact-match (in-distribution), HumanEval
+Infilling pass@1 (out-of-distribution FIM), and RepoBench-Python
+edit-similarity (out-of-distribution L2R, the regression check).
 
-| method | held-out EM | HumanEval Infilling mean pass@1 |
-|---|---|---|
-| base 0.5B | 0.122 | 0.563 |
-| fim_gold 0.5B | 0.150 | 0.557 |
-| fim_mellum 0.5B | 0.156 | 0.553 |
-| fim_mix 0.5B | **0.161** | 0.543 |
-| Mellum-4b (teacher) | -- | **0.652** |
+| method | held-out FIM EM | HumanEval Infilling mean pass@1 | RepoBench avg ES |
+|---|---|---|---|
+| base 0.5B | 0.122 | **0.563** | **0.655** |
+| fim_gold 0.5B | 0.150 | 0.557 | 0.645 |
+| fim_mellum 0.5B | 0.156 | 0.553 | 0.643 |
+| fim_mix 0.5B | **0.161** | 0.543 | 0.646 |
+| Mellum-4b (teacher) | -- | **0.652** | 0.511* |
 
-In-distribution (codeparrot) every fine-tune helps; out-of-distribution
-(HumanEval Infilling) every fine-tune hurts and the 0.5B base is the
-single best non-teacher number. Discussion in the "Mellum-as-teacher
-seq-KD: did it work?" section of `report.md`.
+In-distribution every fine-tune helps. Out-of-distribution FIM
+(HumanEval Infilling) every fine-tune slightly hurts and the 0.5B
+base is the best non-teacher number. Out-of-distribution L2R
+(RepoBench) the four 0.5B variants are within 1.2 ES points of each
+other -- **FIM fine-tuning did not damage L2R LM ability**, which is
+the regression I was checking for. Combined picture: the FIM students
+learned in-distribution FIM, kept their L2R, and slightly hurt
+out-of-distribution FIM. Discussion + Mellum's RepoBench caveat (*)
+in the "Mellum-as-teacher seq-KD: did it work?" section of `report.md`.
 
 ## Why these metrics
 

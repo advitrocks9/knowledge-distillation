@@ -587,6 +587,53 @@ codeparrot multi-line (base 0.000, fim_gold 0.067, fim_mellum 0.083,
 fim_mix 0.083) point the same way: multi-line is where the fine-tune
 produces the clearest gain.
 
+### Third eval column: RepoBench-Python next-line (the L2R regression check)
+
+The HumanEval Infilling regression worried me because I couldn't
+distinguish "FIM training learned codeparrot style and slightly hurts
+out-of-distribution FIM" from "FIM training damaged the student's
+plain LM ability." So I added a third eval on the *other* benchmark
+Mellum's card reports: RepoBench-Python next-line prediction (Liu et
+al. 2023, `tianyang/repobench_python_v1.1`). Three subsets
+(`cross_file_first`, `cross_file_random`, `in_file`), 60 problems
+each at file lengths ≤ 8k, fixed seed shared across all five models.
+Score is edit-similarity (difflib ratio) between the model's first
+generated line and the canonical next line, plus exact-match for
+context.
+
+| method | cf_first | cf_random | in_file | avg ES | avg EM |
+|---|---|---|---|---|---|
+| base 0.5B | **0.587** | 0.681 | 0.697 | **0.655** | 0.239 |
+| fim_gold 0.5B | 0.571 | 0.667 | 0.697 | 0.645 | 0.228 |
+| fim_mellum 0.5B | 0.564 | **0.689** | 0.677 | 0.643 | 0.183 |
+| fim_mix 0.5B | 0.565 | 0.668 | **0.705** | 0.646 | 0.222 |
+| mellum_4b (FIM-wrap) | 0.474 | 0.553 | 0.505 | 0.511 | 0.178 |
+
+The four 0.5B variants land within 1.2 ES points of each other on
+the average and within 2 ES points on every subset. **FIM
+fine-tuning did not damage L2R LM ability.** This is the positive
+null I needed: combined with the HumanEval Infilling regression,
+the picture is "FIM students learned codeparrot-style FIM, didn't
+forget L2R, slightly hurt on FIM out-of-distribution," not "FIM
+students forgot how to be language models."
+
+The Mellum row needs a caveat. My first run gave Mellum raw L2R
+prompts and it scored ES 0.470 — per-problem inspection showed
+Mellum hitting EOS in 1-2 tokens because Mellum-sft-python is
+FIM-only and a raw L2R prompt isn't a shape it knows what to do
+with. Re-running with the prompt wrapped as
+`<fim_suffix><fim_prefix>{code}<fim_middle>` (empty suffix, FIM as
+a degenerate next-token completion) gave the 0.511 in the table
+above. Even with FIM-wrap, Mellum is below the Qwen base. The
+Mellum card reports RepoBench Avg ≤8k = 0.299, which is roughly
+half my 0.511 number, so the published number isn't directly
+comparable to mine -- different RepoBench version, different
+file-length bucket, different cross-file context format. Mellum's
+training format probably uses `<filename>` / `<file_sep>` markers
+between context files that I'm not providing. I'd treat 0.511 as a
+loose lower bound on Mellum's RepoBench performance under my
+specific protocol, not as a comment on Mellum's actual capability.
+
 ### What I'd change
 
 1. **Scale the seq-KD corpus.** 600 examples is way too few. Bavarian
