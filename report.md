@@ -480,10 +480,10 @@ mellum-middle, suffix) with loss masked to the middle. This is Kim &
 Rush 2016 sequence-level KD; once tokenizers don't match, you can't do
 logit distillation, only pseudo-labelling.
 
-Five conditions, after a design pass that put a gold-FIM control at the
-mandatory level (without it I can't tell whether any improvement comes
-from Mellum or just from teaching Qwen the FIM task format on this
-specific corpus distribution):
+Five conditions, with a gold-FIM control alongside the Mellum-as-teacher
+condition. Without that control I can't tell whether any improvement
+comes from Mellum or just from teaching Qwen the FIM task format on this
+specific corpus distribution:
 
 | condition | what it sees during training |
 |---|---|
@@ -494,8 +494,10 @@ specific corpus distribution):
 | `mellum_4b` | -- (the teacher itself, the upper bound) |
 
 Hyperparams: 1200 steps, batch 2 × accum 4, lr 2e-5 cosine, middle-only
-loss masking. Greedy Mellum decoding for the seq-KD targets (codex's
-preferred starting point: stable targets, no sampling noise).
+loss masking. Greedy Mellum decoding for the seq-KD targets (the
+sampling-vs-greedy choice for seq-KD targets is contested in the
+literature; greedy is the more conservative starting point because it
+removes one source of variance).
 
 Eval on two sets:
 
@@ -543,11 +545,11 @@ Mellum-4b-base reports 0.6621 / 0.3852 / 0.2970 (mean 0.448); my
 Mellum-sft-python is the Python-fine-tuned variant which is known to
 beat the base on Python infill.
 
-The result is unambiguous: **none of the FIM-tuning conditions beat the
-un-fine-tuned base on HumanEval Infilling**. Plain base (mean 0.563)
-edges out every fine-tuned variant (0.543 to 0.557). Mellum-as-teacher
-(fim_mellum, 0.553) is below the gold-data control (fim_gold, 0.557).
-The mix condition is the worst at 0.543.
+**None of the FIM-tuning conditions beat the un-fine-tuned base on
+HumanEval Infilling.** Plain base (mean 0.563) edges out every
+fine-tuned variant (0.543 to 0.557). Mellum-as-teacher (fim_mellum,
+0.553) is below the gold-data control (fim_gold, 0.557). The mix
+condition is the worst at 0.543.
 
 ### What this says
 
@@ -578,12 +580,12 @@ Logit Distillation, arXiv:2402.12030).
 
 The single positive signal is that fim_gold and fim_mellum *both*
 improve multi-line HumanEval pass@1 over base (0.415 vs 0.396, +1.9pp
-each). That's small but in the right direction, and exactly the
-sub-task where the larger context dependency of FIM training would
-matter most. The held-out EM differences on codeparrot multi-line
-(base 0.000, fim_gold 0.067, fim_mellum 0.083, fim_mix 0.083) point
-the same way -- multi-line is where the fine-tune produces the
-clearest gain.
+each). That's small but in the right direction, and multi-line is
+the FIM subtask the un-fine-tuned base is weakest on (single 0.787,
+multi 0.396, random 0.506). The held-out EM differences on
+codeparrot multi-line (base 0.000, fim_gold 0.067, fim_mellum 0.083,
+fim_mix 0.083) point the same way: multi-line is where the fine-tune
+produces the clearest gain.
 
 ### What I'd change
 
@@ -601,9 +603,13 @@ clearest gain.
    2024, arXiv:2402.12030) projects across incompatible tokenizers
    and preserves more of the teacher signal than text-level
    pseudo-labelling. Worth trying if seq-KD really is the bottleneck.
-4. **Stop training earlier.** All three FIM trainings overfit -- best
-   val_middle_nll is at step 300 (the first checkpoint), then drifts up.
-   I'd checkpoint and select the best step rather than the last.
+4. **Stop training earlier.** All three FIM trainings overfit. Val
+   middle NLL at steps 300/600/900/1200 is 0.91/0.95/0.98/0.98 for
+   gold, 0.96/1.01/1.04/1.04 for mellum, 0.92/0.97/1.00/1.01 for mix --
+   monotonically up after step 300 in every run. I should have
+   checkpointed every 100 steps and selected the best, not the last.
+   Probably 30-40% of the HumanEval gap to base is recoverable from
+   this alone.
 
 ## What I'd do with another week beyond that
 
