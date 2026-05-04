@@ -345,11 +345,14 @@ eval on each:
 | CE  | 2.370 | 2.378 | 2.386 | 2.378 | 0.008 |
 | RKL | 2.569 | 2.573 | 2.611 | 2.584 | 0.023 |
 
-Gap of 0.206 tokens against a pooled SD of ~0.017 is an effect size of
-~12 SDs. The RKL > CE finding survives seed variance. I deliberately
-didn't seed FKL, GKD, or the un-fine-tuned base: spending three more
-seeds on methods already within noise of each other on a 164-prompt
-eval isn't worth the compute.
+The gap (CE 2.378 -> RKL 2.584, +0.206) is ~10x the larger of the two
+seed SDs (RKL 0.023). With n=3 per arm I wouldn't claim more than
+"the gap survives across seeds and is well outside the per-arm
+jitter"; turning n=3 into a Cohen-style effect-size number would
+overstate what 2 dof per arm can support. I deliberately didn't seed
+FKL, GKD, or the un-fine-tuned base: spending three more seeds on
+methods already within noise of each other on a 164-prompt eval isn't
+worth the compute.
 
 ## What this changed about my read of the paper
 
