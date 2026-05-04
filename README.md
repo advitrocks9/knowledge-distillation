@@ -112,18 +112,16 @@ in the "Mellum-as-teacher seq-KD: did it work?" section of `report.md`.
 
 ## Why these metrics
 
-Held-out NLL is the loss-shaped metric. Forward KL minimises it by
-construction so a forward-KL student wins NLL almost by definition; the
-question is whether that translates downstream. It largely doesn't, in this
-experiment.
-
-HumanEval pass@1 is the user-facing metric. The student gets a Python prompt,
-emits a completion, the test harness runs it. Either it works or it doesn't.
-
-Speculative-decoding draft acceptance is the latency-shaped metric. Per
-[Leviathan et al. (2023)](https://arxiv.org/abs/2211.17192), the probability
-of accepting a drafted token x is `min(1, p_T(x) / p_S(x))`, and the expected
-length of the accepted prefix is what determines wall-clock for a draft-and-
-verify setup. For a team like JetBrains' Mellum, whose explicit constraint is
-inference cost rather than benchmark scores, this is the metric the
-distillation objective should be aimed at -- not NLL, not pass@1.
+Three columns because each one tells a different story. Held-out NLL is
+what the training loss looks at; forward KL minimises it by construction,
+so a forward-KL student wins NLL almost by definition, and the interesting
+question is whether that translates downstream (it largely doesn't here).
+HumanEval pass@1 is what the user actually sees: a prompt goes in, a
+completion comes back, the test harness runs it, it either works or it
+doesn't. Speculative-decoding draft acceptance is what determines latency
+in a draft-and-verify deployment: by [Leviathan et al. (2023)](https://arxiv.org/abs/2211.17192),
+the probability of accepting a drafted token x is `min(1, p_T(x) / p_S(x))`,
+and expected accepted prefix length sets the wall-clock cost. For a team
+like JetBrains' Mellum, whose explicit constraint is inference cost rather
+than benchmark scores, that's the metric the distillation objective should
+be aimed at, not NLL or pass@1.

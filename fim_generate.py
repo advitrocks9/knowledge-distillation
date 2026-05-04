@@ -92,7 +92,7 @@ def main() -> None:
     ap.add_argument("--out-jsonl", type=Path, default=Path("data/fim/mellum_completions.jsonl"))
     ap.add_argument("--max-new", type=int, default=200)
     ap.add_argument("--greedy", action="store_true",
-                    help="greedy decoding (codex prefers this for seq-KD targets at first)")
+                    help="greedy decoding for seq-KD targets (the conservative choice; sampling is the alternative if greedy targets turn out to be too narrow)")
     ap.add_argument("--limit", type=int, default=0,
                     help="limit number of examples to generate (0 = all)")
     ap.add_argument("--batch-size", type=int, default=4,

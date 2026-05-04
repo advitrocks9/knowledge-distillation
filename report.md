@@ -1,57 +1,46 @@
 # Forward vs reverse KL when distilling a code model
 
-I read MiniLLM (Gu et al., ICLR 2024) and wanted to know whether its
+I read MiniLLM (Gu et al., ICLR 2024) and wanted to see whether its
 reverse-KL claim survives contact with a real code teacher and student.
-This is a writeup of what I built (1.5B → 0.5B Qwen2.5-Coder distillation
-on Python, four loss variants, three eval axes) and what changed about
-my read of the paper after I made the eval honest enough to disagree
-with my first-pass conclusion. Both directions matter: the eval got
-better, the conclusion flipped, and the paper turned out to be more
-right than I gave it credit for on my first reading.
+What follows is what I built, 1.5B → 0.5B Qwen2.5-Coder distillation on
+Python with four loss variants, and how my read of the paper changed
+once the eval got honest enough to disagree with my first-pass
+conclusion.
 
-## The paper, in one paragraph
+## The paper
 
 [MiniLLM](https://arxiv.org/abs/2306.08543) argues that the forward KL
-divergence used in standard sequence-level distillation since
+used in standard sequence-level distillation since
 [Hinton et al. (2015)](https://arxiv.org/abs/1503.02531) is the wrong
-objective for autoregressive LLMs. Forward KL is mode-covering: it pushes
-the student to put probability on every token the teacher considers
-possible, including the long tail of locally-plausible-but-globally-wrong
-continuations. When you sample autoregressively from a forward-KL student
-those small leaks compound. Reverse KL is mode-seeking and asks the student
-to put its mass where the teacher does, not the other way round. The student
-is allowed to ignore parts of the teacher distribution it doesn't have
-capacity to represent. MiniLLM pairs this with a policy-gradient training
-scheme so the reverse-KL objective is computed on student-sampled prefixes
-rather than teacher-forced ones, fixing the exposure-bias problem at the
-same time.
+objective for autoregressive LLMs. Forward KL is mode-covering: it
+pushes the student to put probability on every token the teacher
+considers possible, including the long tail of locally-plausible-but-
+globally-wrong continuations. Sample autoregressively from a forward-KL
+student and those small leaks compound. Reverse KL is mode-seeking and
+asks the student to put its mass where the teacher does, not the other
+way round; the student can ignore parts of the teacher's distribution
+it doesn't have capacity to represent. MiniLLM pairs the direction
+switch with a policy gradient over student-sampled prefixes so the
+objective sees the same exposure as inference does.
+[GKD](https://arxiv.org/abs/2306.13649) (Agarwal et al., 2024) arrives
+at the same on-policy fix from the imitation-learning angle. I treat
+MiniLLM as the spine and borrow GKD's simpler on-policy estimator
+because it avoids REINFORCE variance.
 
-The closely related paper is [GKD](https://arxiv.org/abs/2306.13649)
-(Agarwal et al., 2024), which arrives at the same on-policy fix from the
-imitation-learning angle and uses a generalised JSD that interpolates
-between forward and reverse KL. I treat MiniLLM as the spine because the
-reverse-KL framing is the sharper hook, and I borrow GKD's simpler
-on-policy estimator for my own implementation because it avoids the
-variance of REINFORCE.
+## Why this matters for Mellum
 
-## Why this matters for Mellum specifically
-
-Mellum is a 4B-parameter Llama-shaped code completion model trained from
-scratch on 4.2T tokens
-([JetBrains/Mellum-4b-base model card](https://huggingface.co/JetBrains/Mellum-4b-base)),
-on 256 H200 GPUs for ~20 days. Its reason for existing is that JetBrains
-wants completion that runs at "no additional cost to users", which means
-the model has to fit inside an inference-cost budget, not chase benchmark
-numbers. That reframes distillation: it's not "make a smaller model that's
-almost as good"; it's "given a fixed latency target, what's the best
-objective for getting a small student to draft tokens that a verifier will
-keep, or a user will accept." The metric closest to that question is
-speculative-decoding draft acceptance
-([Leviathan et al., 2023](https://arxiv.org/abs/2211.17192)), not held-out
-NLL or even pass@1. The reverse-KL framing matters here because at 4B the
-teacher has real capacity to spread small mass across plausible
-continuations, the "junior dev rambling" failure mode, and you want the
-student to ignore the rambling, not imitate it.
+Mellum is a 4B Llama-shaped code completion model trained from scratch
+on 4.2T tokens
+([model card](https://huggingface.co/JetBrains/Mellum-4b-base)), 256
+H200s for ~20 days. The team's explicit constraint is that completion
+runs at no additional cost to users, so the model has to fit inside an
+inference-cost budget, not chase benchmark numbers. That changes what
+distillation should be aimed at: not "make a smaller model that's
+almost as good," but "given a latency budget, what loss gets the
+student to draft tokens a verifier will keep, or a user will accept."
+The metric closest to that question is speculative-decoding draft
+acceptance ([Leviathan et al., 2023](https://arxiv.org/abs/2211.17192)),
+not held-out NLL or pass@1.
 
 ## Setup
 
@@ -89,10 +78,9 @@ normalisation, no policy-gradient surrogate, no teacher-forced mixing. It's
 
 ### First pass
 
-The cheap version of the eval: 32 HumanEval prompts, K=2 and K=4, no
-confidence intervals. I ran this first because I wanted a number, any
-number, before deciding what to look at more carefully. The first-pass
-table looked like this (`results/eval.json`):
+Cheap version: 32 HumanEval prompts, K=2 and K=4, no CIs. I ran this
+to get a number on the board before deciding what to look at carefully.
+First-pass table (`results/eval.json`):
 
 | run | held-out NLL | HumanEval pass@1 | spec K=2 (max 2) | spec K=4 (max 4) |
 |---|---|---|---|---|
@@ -103,41 +91,50 @@ table looked like this (`results/eval.json`):
 | student + rkl | 1.3328 | 0.262 (43/164) | 1.576 | 2.390 |
 | student + gkd | 1.3181 | 0.268 (44/164) | 1.492 | 2.446 |
 
-The story I wrote down on the first pass: **forward KL wins K=4
-spec-decode**. CE drifts the student toward the data and hurts spec-decode;
-forward KL preserves teacher alignment. K=2 inverts because base
-"front-loads" acceptance.
-
-That story was wrong, or at least not supported by the evidence I had.
+The story I wrote: forward KL wins K=4 spec-decode, CE drifts the
+student toward the data and hurts spec-decode, K=2 inverts because the
+base front-loads acceptance. That story was wrong. 32 prompts can't
+bracket the K=4 means, `max_drafts` was 4 for K=2 but 2 for K=4 (so
+the K=2 column had twice as many draft cycles per prompt), and the
+K=2/K=4 sign-flip was an artefact of those two together.
 
 ### Hardening the spec-decode evaluation
 
-Before locking the headline I sent the eval design to a code-review pass
-(see `notes/levelup-rescue.md`) and the pushback was direct: 32 prompts
-with no error bars and a metric that flips sign between K=2 and K=4 is
-two noisy points that I'd attached a narrative to. The first task wasn't
-seeds, or a new loss, or a bigger teacher -- it was making the existing
-spec-decode numbers credible. Specifically:
+Before locking the headline I sent the design to a code-review pass and
+the pushback was direct: 32 prompts with no error bars and a metric
+that flips sign between K=2 and K=4 is two noisy points that I'd
+attached a narrative to. The first task wasn't seeds or a new loss; it
+was making the existing numbers credible. Hardened protocol:
 
-- 32 → 164 prompts (all of HumanEval, the function-completion shape that
-  matches IDE use; no codeparrot mid-statement truncations, which inflate
-  next-token sharpness artefactually);
-- bootstrap-by-prompt 95% CIs on mean accepted run length;
-- per-prompt cycle CV reported alongside the mean (codex's "your mean is
-  stable but your process might not be" point -- if a code completion
-  team grades on user latency they care about both);
-- shared eval seed across variants so evaluation noise can't masquerade
-  as training signal;
-- locked sampling regime (T=1.0, the protocol from Leviathan et al.
-  2023, applied identically to all variants);
-- per-position acceptance only from the **first** drafted block per
-  prompt, to avoid contamination from previously accepted student
-  prefixes;
-- K=4 only -- K=8 isn't worth the compute until K=4 is precise enough
-  to discriminate trend from variance.
+- All 164 HumanEval prompts (function-completion shape, the closest
+  thing to IDE use; no codeparrot mid-statement truncations, which
+  inflate next-token sharpness artefactually).
+- Bootstrap-by-prompt 95% CIs on mean accepted run length.
+- Within-prompt cycle CV reported alongside the mean: a stable mean
+  with a high CV is uneven user-perceived latency.
+- Shared eval seed across variants so eval noise can't pose as
+  training signal. Locked sampling at T=1.0 (the Leviathan rule),
+  identical across all five runs.
+- Per-position acceptance from the **first** drafted block per prompt
+  only, so it isn't contaminated by accepted student prefixes from
+  earlier cycles.
+- K=4 only. K=8 isn't worth the compute until K=4 is precise enough to
+  discriminate trend from variance, which on 164 prompts it barely is.
 
-Code is `spec_eval.py`; results are `results/spec_eval.json`. The
-re-eval ran in ~50 minutes on the 4090 once the protocol was locked.
+Code is `spec_eval.py`; results in `results/spec_eval.json`. ~50
+minutes on the 4090 once the protocol was locked.
+
+One protocol choice worth flagging because it differs from textbook
+Leviathan: I report the per-block expected accepted run length
+`E[L] = sum_i prod_{j<=i} min(1, p_T/p_S)` rather than rolling the
+rejection-sampling Bernoulli per drafted token and reporting the
+realised count. Both estimands converge to the same value in
+expectation; the analytical version removes one source of eval noise
+so the variant ranking comes out of fewer prompts. The ranking is
+unaffected because the same estimator is applied across all five runs;
+the per-position numbers (which are just the acceptance probabilities
+themselves) are bit-exact either way. Not bit-exact Leviathan, but the
+comparison it supports is honest.
 
 ### Hardened spec-decode results, K=4
 
@@ -150,44 +147,32 @@ re-eval ran in ~50 minutes on the 4090 once the protocol was locked.
 | student + rkl | **2.573** | [2.474, 2.684] | 0.442 |
 | student + gkd | 2.562 | [2.460, 2.658] | 0.446 |
 
-Pairs whose 95% CIs do not overlap (i.e. statistically distinguishable at
-this sample size):
+The only pairs whose 95% CIs don't overlap are
+`student_rkl > student_ce` and `student_gkd > student_ce`. Every other
+pair is within noise. The first-pass headline (FKL wins K=4) doesn't
+survive: with 164 prompts and proper CIs, the FKL student is tied with
+the base and both RKL variants. The actual significant finding is
+**reverse-KL distillation preserves teacher alignment significantly
+better than CE-only fine-tuning**, which is closer to what MiniLLM
+predicts than my first claim.
 
-- `student_rkl > student_ce`
-- `student_gkd > student_ce`
-
-That's it. Every other pair has overlapping CIs and isn't distinguishable.
-
-The first-pass headline -- "forward KL wins K=4" -- did not survive. The
-gap I attached a story to was a 32-prompt sample-size artefact: with 164
-prompts and proper CIs, the FKL student is statistically tied with the
-un-fine-tuned base and with both reverse-KL variants. The actual
-significant finding is **reverse-KL distillation preserves teacher
-alignment significantly better than CE-only fine-tuning**, which is
-closer to what MiniLLM predicts than what I originally claimed.
-
-The within-prompt CV of ~0.45-0.51 across all student variants is the
-other thing the first-pass eval was hiding. The mean accepted run is
-~2.5 / 4, but draft-cycle-to-draft-cycle the student is producing run
-lengths that vary by ~50% of the mean. For a deployed code completion
-model that translates to noticeably uneven latency. The teacher's CV is
-0.014, two orders of magnitude smaller, which is what "stable from the
-verifier's point of view" looks like.
+Within-prompt CV of ~0.45-0.51 across all student variants is what the
+first-pass eval was also hiding. The mean accepted run is ~2.5/4, but
+cycle-to-cycle the student produces run lengths that vary by ~50% of
+the mean. For a deployed code completion model that's uneven latency.
+The teacher's CV is 0.014, two orders of magnitude smaller, which is
+what "stable from the verifier's point of view" looks like.
 
 ### Per-position analysis on the val corpus
 
-Spec-decode is one window into "does the student match the teacher's
-distribution." A more direct window is to compute the per-token KL,
-top-1 agreement, and total-variation distance at every position of the
-val corpus. The val tensor is 128 sequences × 512 tokens, of which
-~61.5K positions are non-pad. Bucket the positions by teacher entropy
-into quartiles -- low entropy is "the teacher knows exactly what comes
-next" (operators, indentation, common keywords); high entropy is "the
-teacher has a spread distribution" (variable names, choice of API,
-high-level structure).
+A more direct window than aggregate spec-decode: per-token TV and
+top-1 mass on the val tensor (128 seqs × 512 tokens, ~61.5K non-pad
+positions), bucketed by teacher entropy into quartiles. Low entropy
+is "the teacher knows exactly what comes next" (operators, indentation,
+common keywords); high entropy is "the teacher has a spread"
+(variable names, API choice, high-level structure).
 
-**Mass on the teacher's top-1 token** (`p_S(argmax p_T)` -- higher means
-the student more confidently backs the teacher's preferred next token):
+**Mass on the teacher's top-1 token** `p_S(argmax p_T)`:
 
 | run | q1 (H~0) | q2 (H~0.18) | q3 (H~0.97) | q4 (H~3.16) | overall |
 |---|---|---|---|---|---|
@@ -197,9 +182,7 @@ the student more confidently backs the teacher's preferred next token):
 | **rkl** | **0.994** | **0.930** | **0.669** | **0.320** | **0.728** |
 | gkd | 0.990 | 0.908 | 0.637 | 0.291 | 0.706 |
 
-**Total-variation distance to teacher distribution** (`0.5 * Σ|p_S - p_T|`
--- lower means the student matches the teacher's full distribution shape,
-not just its mode):
+**Total-variation distance to teacher** `0.5 Σ|p_S - p_T|`:
 
 | run | q1 | q2 | q3 | q4 | overall |
 |---|---|---|---|---|---|
@@ -209,139 +192,26 @@ not just its mode):
 | **rkl** | **0.006** | **0.063** | **0.189** | 0.350 | **0.152** |
 | gkd | 0.009 | 0.078 | 0.194 | 0.343 | 0.156 |
 
-This is the figure where the loss-shape effect is visible. The two
-mechanisms MiniLLM predicts -- forward KL is mode-covering, reverse KL
-is mode-seeking -- show up cleanly at the per-position level even
-though the aggregate spec-decode column only barely separates them:
-
-- **CE drifts the student furthest from the teacher**, especially at
-  high-entropy positions. q4 TV jumps from 0.337 (base) to 0.365 (ce);
-  q3 TV jumps from 0.193 to 0.231. The argmax-agreement at q4 also
-  drops the most under CE (0.604 → 0.574). This is the per-position
-  evidence behind the spec-decode result that CE significantly
-  underperforms the KL methods.
-- **FKL matches the teacher's distribution shape best at q4** (TV 0.338,
-  the closest of all four trained variants to the base 0.337) but does
-  *not* increase the student's confidence on the teacher's top-1
-  (0.261, slightly below base's 0.265). That's exactly mode-covering
-  in action: FKL preserves the teacher's spread, including the spread.
-- **RKL maximally concentrates mass on the teacher's top-1 token** at
-  every bucket and especially at q4: 0.320 vs base 0.265, FKL 0.261.
-  At the same time RKL's q4 TV is 0.350 -- slightly *worse* than FKL,
-  because RKL isn't matching the teacher's full shape, it's mode-seeking.
-  That trade-off is the textbook reverse-KL behaviour.
-
-The three losses are doing exactly what the literature says they should
-do. The reason this doesn't translate into a large aggregate spec-decode
-gap is that argmax-agreement (which drives most of the per-token
-acceptance) is dominated by the q1+q2 buckets where every method
-agrees with the teacher >96% of the time. The q4 bucket, where the
-methods diverge meaningfully, is only ~25% of positions and contributes
-proportionally less to the K=4 average. So the per-position figure
-shows the loss-shape mechanism more clearly than any aggregate metric I
-ran -- and the aggregate metrics, with proper CIs, only reveal the
-distillation-vs-no-distillation contrast.
-
-### Why the per-position TV table predicts the spec-decode ranking
-
-After computing the per-position TV table I had to double-check
-whether the spec-decode column and the TV column were measuring the
-same thing. They are, at the per-token level, by Corollary 3.6 of
-[Leviathan et al. (2023)](https://arxiv.org/abs/2211.17192): the per-token
-acceptance probability under speculative decoding is exactly
-`1 - TV(p_S, p_T)`. The proof is one step from the rule
-`min(1, p_T(x)/p_S(x))` and the standard identity
-`sum_x min(p, q) = 1 - TV(p, q)`. DistillSpec (Zhou et al. 2023, §3) uses
-this as the load-bearing identity for their training objective. I
-should have spotted that earlier in my own writeup; I was treating
-spec-decode and per-position TV as adjacent metrics rather than the
-same quantity in different units.
-
-What I think is actually mine -- the empirical operationalisation --
-is using the per-position acceptance β_i (which is `1 - TV` at each
-draft position) to predict the K=4 ranking via the right formula. The
-expected accepted run length is the survival-weighted compound
-`E[run/K] = (1/K) * sum_{i=1..K} prod_{j=1..i} β_j`. Equal-weight
-average of β across positions is *not* the right quantity -- two
-methods with the same mean β can have different K=4 numbers if one
-puts its acceptance budget early and the other puts it late. The
-correct survival-weighted prediction is in `analyses/predict_specdecode.py`:
-
-| run | β1 | β2 | β3 | β4 | predicted E[run/4] | observed run/4 |
-|---|---|---|---|---|---|---|
-| teacher | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.995 |
-| base | 0.959 | 0.628 | 0.730 | 0.837 | 0.592 | 0.629 |
-| ce  | 0.960 | 0.615 | 0.717 | 0.841 | 0.582 | 0.590 |
-| fkl | 0.958 | 0.618 | 0.735 | 0.827 | 0.586 | 0.619 |
-| rkl | 0.967 | 0.655 | 0.701 | 0.828 | 0.603 | 0.643 |
-| gkd | 0.962 | 0.666 | 0.710 | 0.809 | **0.607** | 0.640 |
-
-The survival-weighted ranking is `gkd > rkl > base > fkl > ce`. The
-observed ranking is `rkl > gkd > base > fkl > ce`. The top two swap
-between predicted and observed -- the gap between RKL and GKD is small
-in both (0.004 in predicted, 0.003 in observed) and inside the
-spec-decode bootstrap CIs that overlap heavily. So the survival-
-weighted prediction matches observed to within tied positions.
-
-Two real surprises in this table: predictions are systematically
-*lower* than observed (CE 0.582 vs 0.590, RKL 0.603 vs 0.643). That's
-the opposite of what I expected. My naive intuition was that later
-draft cycles are conditioned on student-sampled prefixes that have
-drifted from the teacher, so β at later cycles should be lower than
-first-cycle β -- and the prediction uses first-cycle β only. The data
-say the opposite: later cycles have higher β. The plausible
-explanation is that the spec-decode advance step pushes the prefix
-towards positions where the student is highly confident locally
-(end-of-line, closing brackets, etc.), and those positions have very
-high acceptance even when the student-teacher distribution diverges
-elsewhere. I haven't run a confirmatory experiment for this yet.
-
-The subtler thing the per-position TV table reveals -- this part is
-mine -- is **why FKL doesn't win the TV column despite Pinsker's
-inequality saying it should**. Forward KL is the standard cleanest
-minimiser of TV (`TV ≤ sqrt(KL(p_T || p_S) / 2)`), and the literature
-gives it credit accordingly. At this scale FKL still doesn't win mean
-TV. The reason is capacity: when the student can't match the teacher's
-full distribution exactly, forward KL has to spread the available
-probability mass across all of the teacher's support, including
-positions where the teacher is itself uncertain (the q4 bucket).
-Reverse KL mode-collapses onto the teacher's high-density regions,
-giving very low TV at q1-q3 (where the teacher is sharp and mode-
-collapsing is the right strategy) at the cost of slightly higher TV
-at q4 (where the teacher is spread and mode-collapsing is wrong). For
-the val-corpus position distribution -- 75% low-entropy positions, 25%
-high-entropy -- the second strategy wins on aggregate. That's what the
-per-position TV table is showing in one sentence: **the right loss
-direction depends on what fraction of your positions are mode-seekable
-versus mode-coverable, and Python source has more of the former**.
-
-### Three-seed sanity on CE vs RKL
-
-The gap CE → RKL on spec-decode is the only statistically distinguishable
-finding from the single-seed eval, so it's worth confirming it isn't an
-artefact of one lucky training seed. I retrained CE and RKL at seeds 0,
-1, 2 (same data, same hyperparams, only the torch.manual_seed call
-changes), re-ran the hardened spec-decode eval on each, and got:
-
-| variant | seed 0 | seed 1 | seed 2 | mean | seed std |
-|---|---|---|---|---|---|
-| CE  | 2.370 | 2.378 | 2.386 | 2.378 | 0.008 |
-| RKL | 2.569 | 2.573 | 2.611 | 2.584 | 0.023 |
-
-Gap of 0.206 tokens against a pooled SD of ~0.017 is an effect size of
-~12 SDs. The RKL > CE finding survives seed variance.
-
-I deliberately didn't seed FKL, GKD, or the un-fine-tuned base. CE vs
-RKL is the pair where the hardened single-seed eval showed
-non-overlapping bootstrap CIs; spending compute confirming that pair
-is worth it, spending compute on three more seeds of methods that are
-already within noise of each other on a 164-prompt eval isn't.
+This is where the loss-shape effect is actually visible. CE drifts the
+student furthest from the teacher, especially at high entropy (q4 TV
+0.337 base → 0.365 ce, q3 TV 0.193 → 0.231, q4 argmax-agreement 0.604
+→ 0.574); that's the per-position evidence behind CE underperforming
+the KL methods on aggregate. FKL matches the teacher's distribution
+shape best at q4 (TV 0.338, closest of any trained variant to base
+0.337) without raising top-1 mass beyond base, which is mode-covering
+exactly as advertised. RKL does the opposite: maximally concentrates
+mass on the teacher's top-1 at every bucket (q4 0.320 vs base 0.265,
+FKL 0.261) at the cost of slightly worse q4 TV (0.350 vs FKL 0.338),
+the textbook mode-seeking trade-off. The reason this barely shows up
+in aggregate spec-decode is that argmax-agreement is dominated by
+q1+q2 (every method >96% there); the q4 bucket where the methods
+diverge contributes proportionally less to the K=4 mean.
 
 ### Per-position acceptance, first block of K=4
 
-This is the figure I should have led with on the first pass. For each
-method, mean acceptance probability at draft positions 1 through 4,
-computed only on the first block sampled from each prompt:
+For each method, mean acceptance probability at draft positions 1
+through 4, computed only on the first block sampled per prompt (so
+later cycles can't bias position-1):
 
 | run | pos 1 | pos 2 | pos 3 | pos 4 |
 |---|---|---|---|---|
@@ -352,160 +222,174 @@ computed only on the first block sampled from each prompt:
 | **rkl** | **0.967** | **0.655** | 0.701 | 0.828 |
 | gkd | 0.962 | **0.666** | 0.710 | 0.809 |
 
-Two things this reveals that the aggregate hides:
+The win of RKL and GKD over CE shows up almost entirely at positions 1
+and 2 (RKL pos-2 0.655 vs CE 0.615, RKL pos-1 0.967 vs CE 0.960); at
+positions 3 and 4 the methods are roughly tied. Mode-seeking
+distillation sharpens first-token agreement where prompt context is
+most informative, then tapers as every method converges. The pos-1
+/ pos-2 / pos-3+ shape itself is universal: pos-1 is high because the
+student inherits good first-token prediction from pretraining; pos-2
+dips because it's the first token sampled conditional on the
+student's prefix; pos-3+ recovers because student-likely paths are
+paths the student finds easy to continue. Loss variants change the
+height of the curve, not its shape. This is also what kills the
+first-pass K=2 story: the per-position picture has FKL and base tied
+at every individual position, exactly what the K=4 aggregate says.
 
-1. The win of RKL and GKD over CE shows up almost entirely at draft
-   positions 1 and 2. RKL pos 2 is 0.655 (vs CE 0.615); RKL pos 1 is
-   0.967 (vs CE 0.960). At positions 3 and 4 the methods are roughly
-   tied. That's consistent with mode-seeking distillation: it sharpens
-   the student's first-token agreement with the teacher (where the
-   prompt context is most informative) and provides less differential
-   benefit at later positions where every method is converging to similar
-   distributions.
-2. The pos-1 / pos-2 / pos-3+ shape is universal across methods. Pos 1
-   is high (~0.96) because the student inherits good first-token
-   prediction from pretraining. Pos 2 dips because that's the first
-   token sampled conditional on the *student's* sampled prefix, where
-   the student-teacher distribution gap matters most. Pos 3+ recovers
-   because conditioning on a student-likely path is also a path the
-   student finds locally easy to continue. None of the four loss
-   variants change the *shape* of this curve, only the absolute height.
+### Tying it back to spec-decode
 
-This per-position pattern is also what kills my first-pass K=2 story.
-The "FKL is worst at K=2" claim was about an aggregate over a draft
-cycle that itself averages over noisy positions. The properly
-disaggregated picture says FKL and base are tied at every individual
-position, which is what the K=4 aggregate also says.
+The per-position TV column and the per-position acceptance column are
+the same quantity in different units. By Corollary 3.6 of
+[Leviathan et al. (2023)](https://arxiv.org/abs/2211.17192), per-token
+acceptance is exactly `1 - TV(p_S, p_T)` (one step from the rule
+`min(1, p_T(x)/p_S(x))` and the identity `sum_x min(p, q) = 1 - TV`).
+DistillSpec (Zhou et al. 2023, §3) uses this as the central identity
+behind their training objective. I'd been treating them as adjacent
+metrics; they aren't.
+
+That changes the right way to predict K=4 from per-position acceptance
+β_i. The mean β across positions isn't the quantity that matters; the
+survival-weighted compound is:
+
+`E[run/K] = (1/K) * sum_{i=1..K} prod_{j=1..i} β_j`
+
+Two methods with the same mean β can have different K=4 numbers if one
+puts its acceptance budget early and the other late.
+`analyses/predict_specdecode.py` plugs the per-position β into this:
+
+| run | predicted E[run/4] | observed run/4 |
+|---|---|---|
+| teacher | 1.000 | 0.995 |
+| base | 0.592 | 0.629 |
+| ce  | 0.582 | 0.590 |
+| fkl | 0.586 | 0.619 |
+| rkl | 0.603 | 0.643 |
+| gkd | **0.607** | 0.640 |
+
+Predicted ranking is `gkd > rkl > base > fkl > ce`; observed is
+`rkl > gkd > base > fkl > ce`. The top two swap (the RKL-GKD gap is
+0.004 predicted, 0.003 observed, well inside the bootstrap CIs);
+otherwise preserved.
+
+Two surprises. First, predictions are systematically *lower* than
+observed (CE 0.582 vs 0.590, RKL 0.603 vs 0.643), opposite of my
+intuition that later cycles condition on student-drifted prefixes and
+should have lower β than first-cycle β. The data go the other way.
+Plausible explanation: the advance step pushes the prefix toward
+positions the student is locally confident at (end-of-line, closing
+brackets), which have high acceptance even when the broader
+distribution diverges. No confirmatory experiment yet.
+
+Second, why FKL doesn't win mean TV despite Pinsker's inequality
+(`TV ≤ sqrt(KL(p_T || p_S) / 2)`) saying it should. Capacity. When the
+student can't match the teacher's full distribution exactly, FKL has
+to spread mass across the teacher's full support, including positions
+where the teacher is itself uncertain (q4). RKL mode-collapses onto
+the high-density regions, giving very low TV at q1-q3 at the cost of
+slightly higher TV at q4. The per-position TV table says it: 75% of
+Python positions are mode-seekable, 25% are mode-coverable. RKL wins
+aggregate because the seekable fraction dominates.
+
+### Three-seed sanity on CE vs RKL
+
+CE → RKL is the only pair the single-seed hardened eval distinguishes
+significantly, so it's worth confirming it isn't a lucky-seed artefact.
+I retrained CE and RKL at seeds 0, 1, 2 (same data, same hyperparams,
+only `torch.manual_seed` changes) and re-ran the hardened spec-decode
+eval on each:
+
+| variant | seed 0 | seed 1 | seed 2 | mean | seed std |
+|---|---|---|---|---|---|
+| CE  | 2.370 | 2.378 | 2.386 | 2.378 | 0.008 |
+| RKL | 2.569 | 2.573 | 2.611 | 2.584 | 0.023 |
+
+Gap of 0.206 tokens against a pooled SD of ~0.017 is an effect size of
+~12 SDs. The RKL > CE finding survives seed variance. I deliberately
+didn't seed FKL, GKD, or the un-fine-tuned base: spending three more
+seeds on methods already within noise of each other on a 164-prompt
+eval isn't worth the compute.
 
 ## What this changed about my read of the paper
 
-The honest version of this section needs to be in two parts, because what
-I think the paper says changed when the eval got more honest.
+After the first-pass eval I'd written that MiniLLM was overstating its
+case for code distillation. After the hardened eval that's the wrong
+read. The loss-direction effect I'd attached a narrative to was a
+32-prompt sample-size artefact; what survives is the distillation
+effect itself, "use the teacher" beats "don't," on the metric that
+maps onto latency. That's actually consistent with MiniLLM at this
+scale: same architecture, same pretraining mix, 3× capacity gap means
+teacher and student already largely agree at the head of the
+distribution, so the loss-shape lever mostly shows up as "did you use
+the teacher at all," not "which KL direction." The right place to test
+the mechanism in full is wider gaps: 7B → 0.5B in Qwen, or
+Mellum-4B → sub-1B.
 
-**After the first-pass eval**, I thought the paper was overstating its
-case for autoregressive code distillation: forward KL had won my K=4
-spec-decode column and reverse KL had won nothing. I wrote that the
-reverse-KL win was conditional on the teacher having a structured tail
-mass that my 1.5B code teacher didn't have, and that the on-policy fix
-in MiniLLM was load-bearing in a way the headline of the paper hides.
+The on-policy fix in MiniLLM/GKD is the part of the recipe my naive
+`gkd` run isn't really exercising. It lands inside the off-policy
+reverse-KL CI despite being on-policy, which says my naive "sample,
+score, reverse-KL on the segment" isn't adding what MiniLLM's algorithm
+adds: length-normalised reward, teacher-mixed prefixes, single-step
+decomposition. With those, on-policy should beat off-policy reverse KL
+by more than the noise floor. And
+[DistillSpec](https://arxiv.org/abs/2310.08461) is the natural next
+objective: it trains the student against per-token acceptance
+probability directly, which is the quantity whose units match the
+metric the eval discriminates on.
 
-**After the hardened eval**, the situation is different. CE-only
-fine-tuning is statistically worse than reverse-KL training on draft
-acceptance, and the KL-direction methods are all within noise of each
-other. That's actually consistent with what MiniLLM's argument predicts
-at this scale: when the teacher and student already largely agree (same
-architecture, same pretraining mix, 3× capacity gap), the loss-shape
-effect mostly shows up as "did you use the teacher at all", not "which
-KL direction did you use." The reverse-KL student edges out the FKL
-student by 0.1 of a token at K=4 on the means, which is in the right
-direction but not statistically distinguishable.
+## Smaller things from the runs
 
-The thing I was wrong about is that I'd attached a clear loss-direction
-story to a 32-prompt eval. With proper CIs the loss-direction effect is
-indistinguishable from noise at this teacher size. What's distinguishable
-is the **distillation effect itself** -- using the teacher (any KL
-direction) versus not using the teacher (CE) -- on the metric that
-maps onto inference latency.
+5e-5 overshot and made every run worse than base on val NLL; 2e-5
+with 100-step warmup is what worked. The bug along the way was calling
+`sched.step()` only inside the gradient-accumulation branch, which
+advanced the cosine schedule 4× slower than intended. The 1e-5 to 3e-5
+range is what distillation papers cite for fine-tuning a pretrained
+student, not the 5e-5 you'd use from scratch.
 
-Three things this updates me on, in priority order:
+GKD is ~5× slower per step than CE because every step samples 64
+tokens autoregressively from the student before computing the loss,
+and gradient checkpointing forces KV caching off in `generate`. The
+obvious optimisation for a serious follow-up is a replay buffer of
+student rollouts so it isn't resampled every step.
 
-1. **The right unit for distillation evaluation is acceptance length with
-   CIs, not aggregate NLL or aggregate pass@1.** NLL favours forward KL
-   by construction. Pass@1 at 164 problems is too noisy to discriminate
-   between methods that differ by a few percentage points. Spec-decode
-   acceptance length is the only column whose units map onto deployed
-   latency, and it's the column where the four methods spread on the
-   first-pass eval, hardened with bootstrap CIs that survive a senior
-   reviewer reading the table.
-
-2. **The reverse-KL win at this scale is small, but in the right
-   direction.** RKL beats CE significantly; RKL beats FKL/base
-   non-significantly. That's consistent with the paper's mechanism --
-   reverse KL preserves teacher alignment better than data-fitting CE --
-   but at a smaller magnitude than the paper's instruction-following
-   experiments, because my teacher has less of the kind of tail mass
-   that makes the mode-covering vs mode-seeking distinction matter.
-   The interesting place to test the paper's mechanism in full is at
-   wider teacher-student gaps (7B → 0.5B, Mellum-4B → sub-1B).
-
-3. **The on-policy fix in MiniLLM/GKD is still the load-bearing part of
-   the recipe.** My naive `gkd` run is statistically tied with `rkl`
-   despite being on-policy, which says my naive on-policy version isn't
-   adding the things MiniLLM's full algorithm adds (length-normalised
-   reward, teacher-mixed prefixes, single-step decomposition). With
-   those, I'd expect on-policy to beat off-policy reverse KL by more
-   than the noise floor.
-
-4. **DistillSpec is the natural objective.** [DistillSpec](https://arxiv.org/abs/2310.08461)
-   trains the student against the spec-decode acceptance probability
-   directly. That's the loss whose units match the metric the eval
-   showed actually discriminates between the methods. If I had another
-   week of compute I'd add it as a fifth variant and see whether it
-   widens the rkl-vs-ce gap.
-
-## A few smaller observations from the runs
-
-- The first lr I tried (5e-5) overshot and made every run worse than the
-  base student on val NLL. I moved to 2e-5 with 100-step warmup and a
-  proper cosine schedule that decays over real training steps (the bug I
-  hit was that I was calling `sched.step()` only inside the
-  gradient-accumulation branch, so the schedule advanced 4× slower than
-  intended). Worth noting because if you're skim-reading distillation
-  papers, the LR they cite for "fine-tuning a pretrained student" is
-  almost always 1e-5 to 3e-5, not the 5e-5 you'd use training from scratch.
-
-- The GKD run is roughly 5× slower than CE per step on the 4090 because
-  every step does a 64-token autoregressive sample from the student before
-  computing the loss. With KV caching disabled (gradient checkpointing
-  forces it off in HuggingFace `generate`), that's 64 forward passes
-  through the 0.5B student per training step. There's an obvious
-  optimisation to be made there for any serious follow-up: cache student
-  rollouts across steps and sample from a replay buffer.
-
-- `codeparrot-clean-valid` has near-duplicates. Several of my training
-  sequences are template-y test-fixture files that recur across the
-  corpus. I left them in for the experiment to be honest about my data,
-  but a real run would want to deduplicate by file hash plus a near-dup
-  filter before tokenising.
+`codeparrot-clean-valid` has near-duplicates: several of my training
+sequences are template-y test-fixture files that recur across the
+corpus. Left them in to be honest about the data; a real run would
+dedupe by file hash plus a near-dup filter.
 
 ## Mellum-as-teacher seq-KD: did it work?
 
-The most obvious gap in the original Qwen-on-Qwen writeup was that I
-kept talking about Mellum and never used it. The follow-up I built --
-ran on Modal with $30 of credits after the lab GPU box went down -- is
-a cross-tokenizer sequence-level distillation. Mellum-4b-sft-python
+The obvious gap in the Qwen-on-Qwen experiment is that I kept talking
+about Mellum without using it. This follow-up, which I ran on Modal
+with $30 of credits after the lab GPU box went down, is a
+cross-tokenizer sequence-level distillation: Mellum-4b-sft-python
 generates FIM completions on a Python corpus, those text targets get
 re-tokenized in Qwen, and Qwen2.5-Coder-0.5B is SFT'd on (prefix,
-mellum-middle, suffix) with loss masked to the middle. This is Kim &
-Rush 2016 sequence-level KD; once tokenizers don't match, you can't do
-logit distillation, only pseudo-labelling.
+mellum-middle, suffix) with loss masked to the middle. This is
+Kim & Rush 2016 seq-level KD: once tokenizers don't match, you can't
+do logit distillation, only pseudo-labelling.
 
-Five conditions, with a gold-FIM control alongside the Mellum-as-teacher
-condition. Without that control I can't tell whether any improvement
-comes from Mellum or just from teaching Qwen the FIM task format on this
-specific corpus distribution:
+Five conditions. The gold-FIM condition is the control: without it I
+can't separate "Mellum's text is good signal" from "any FIM fine-tune
+on this corpus would help."
 
 | condition | what it sees during training |
 |---|---|
-| `base` | nothing -- the un-fine-tuned Qwen2.5-Coder-0.5B |
+| `base` | nothing, the un-fine-tuned Qwen2.5-Coder-0.5B |
 | `fim_gold` | (prefix, *ground-truth* middle, suffix), 600 codeparrot examples |
 | `fim_mellum` | (prefix, *Mellum-generated* middle, suffix), same 600 examples |
 | `fim_mix` | 50/50 mix of gold and mellum middles |
-| `mellum_4b` | -- (the teacher itself, the upper bound) |
+| `mellum_4b` | the teacher itself, upper bound |
 
 Hyperparams: 1200 steps, batch 2 × accum 4, lr 2e-5 cosine, middle-only
-loss masking. Greedy Mellum decoding for the seq-KD targets (the
-sampling-vs-greedy choice for seq-KD targets is contested in the
-literature; greedy is the more conservative starting point because it
-removes one source of variance).
+loss masking, greedy Mellum decoding for the seq-KD targets (greedy is
+the more conservative target choice because it removes one source of
+variance; sampling-vs-greedy seq-KD targets is contested in the
+literature).
 
-Eval on two sets:
-
-1. **Held-out codeparrot FIM** (180 examples, 60 per masking kind):
-   exact-match against gold middles. Same distribution as training.
-2. **HumanEval Infilling** (164 examples per subset, fixed seed
-   subsample): the actual published Mellum benchmark. Different
-   distribution, more curated, written-by-hand.
+Eval is held-out codeparrot FIM (180 examples, 60 per masking kind,
+exact-match against gold middles, in-distribution) and HumanEval
+Infilling (164 per subset, fixed seed shared across models, the
+published Mellum benchmark, out-of-distribution).
 
 ### Held-out codeparrot FIM (in-distribution)
 
@@ -516,19 +400,18 @@ Eval on two sets:
 | fim_mellum | 0.383 | 0.083 | 0.000 | 0.156 | 1.018 |
 | **fim_mix** | **0.400** | **0.083** | 0.000 | **0.161** | 0.975 |
 
-In-distribution, FIM training works. Mix wins on EM (+3.9 pp over base);
-gold wins on the NLL-against-gold-middles metric, which it should by
-construction. fim_mellum has *worse* gold-middle NLL than base because
-it learned to generate Mellum-style middles, which differ from gold
-middles in style. But fim_mellum's exact-match is competitive with
-fim_gold, suggesting Mellum's generated middles are closer to the gold
-in actual content than they are in token-level distribution.
+In-distribution, FIM training works. Mix wins EM (+3.9pp over base);
+gold wins NLL-against-gold-middles, which it should by construction.
+fim_mellum has *worse* gold-middle NLL than base because it learned to
+generate Mellum-style middles that differ from gold middles in style;
+its exact-match is still competitive with fim_gold, which says Mellum's
+middles are closer to gold in content than in token distribution.
 
 ### HumanEval Infilling (out-of-distribution, the published benchmark)
 
-Sub-sampled 164 of each subset (full set is 1033/5815/1640) with a
-fixed random seed shared across all five models. pass@1 by running the
-canonical test against `prefix + completion + suffix`:
+164 sub-sampled per subset (full set is 1033/5815/1640), fixed seed
+shared across all five models, pass@1 against `prefix + completion +
+suffix`:
 
 | method | single | multi | random | mean |
 |---|---|---|---|---|
@@ -538,68 +421,58 @@ canonical test against `prefix + completion + suffix`:
 | fim_mix 0.5B | 0.768 | 0.390 | 0.470 | 0.543 |
 | mellum_4b (teacher) | 0.738 | **0.537** | **0.683** | **0.652** |
 
-For sanity-check reference, the public Qwen2.5-Coder-0.5B paper reports
-0.754 / 0.473 / 0.460 (mean 0.562) on the full set; my 164-subsample
-base of 0.787 / 0.396 / 0.506 (mean 0.563) is consistent with that.
-Mellum-4b-base reports 0.6621 / 0.3852 / 0.2970 (mean 0.448); my
-Mellum-sft-python is the Python-fine-tuned variant which is known to
-beat the base on Python infill.
+Sanity-check: Qwen2.5-Coder-0.5B's paper reports 0.754/0.473/0.460
+(mean 0.562) on the full set; my 164-subsample base of
+0.787/0.396/0.506 (mean 0.563) lines up. Mellum-4b-base reports
+0.6621/0.3852/0.2970 (mean 0.448); my Mellum-sft-python is the
+Python-fine-tuned variant which is known to beat the base on Python
+infill.
 
 **None of the FIM-tuning conditions beat the un-fine-tuned base on
-HumanEval Infilling.** Plain base (mean 0.563) edges out every
-fine-tuned variant (0.543 to 0.557). Mellum-as-teacher (fim_mellum,
-0.553) is below the gold-data control (fim_gold, 0.557). The mix
-condition is the worst at 0.543.
+HumanEval Infilling.** Plain base (0.563) edges out every fine-tuned
+variant. fim_mellum (0.553) is below the gold-data control fim_gold
+(0.557); fim_mix is worst at 0.543.
 
 ### What this says
 
-The held-out result and the HumanEval result point in opposite
-directions. FIM training improves performance on the
-training-distribution (codeparrot) and degrades it on the
-distribution-shift benchmark (HumanEval). The student is learning the
-*style* of the training corpus, not the *task* of FIM.
+In-distribution and out-of-distribution point opposite ways. FIM
+training improves performance on the training distribution (codeparrot)
+and degrades it on the distribution-shift benchmark (HumanEval). The
+student is learning the *style* of the training corpus, not the *task*
+of FIM. That's the failure mode Bavarian et al. (2022) flag in the FIM
+paper: FIM capability comes from the data transformation at pretraining
+scale, not from a 600-example fine-tune layered on a model already
+FIM-pretrained on billions of tokens.
 
-The reason is the one Bavarian et al. (2022) flag in the FIM
-pretraining paper: FIM capability comes from the data transformation
-*at pretraining scale*, not from a small fine-tune. Qwen2.5-Coder-0.5B
-was already FIM-pretrained on billions of tokens. My 600-example
-fine-tune adds noise relative to that.
+The Mellum-as-teacher signal isn't visible at this scale either:
+`fim_mellum` and `fim_gold` are within noise on both evals, with the
+small direction of effect on HumanEval Infilling consistent with
+"Mellum's decoded text drifts slightly off the canonical-solution form
+HumanEval grades against." A larger corpus, or logit-level KD instead
+of text-level pseudo-labels, would be the right place to look.
+Cross-tokenizer logit distillation is the obvious next step but the
+engineering is real: two BPE schemes need either a byte-level alignment
+or a soft-token bridge à la
+[ULD (Boizard et al. 2024)](https://arxiv.org/abs/2402.12030).
 
-The Mellum-as-teacher signal is also not visible at this scale.
-fim_mellum and fim_gold are within noise of each other on both evals; the
-direction of effect on HumanEval Infilling (fim_mellum slightly worse
-than fim_gold) is consistent with "Mellum's text outputs are sometimes
-slightly off-distribution for the canonical-solution form HumanEval
-expects." A larger Mellum-generated corpus, or distillation that
-preserves Mellum's actual logits rather than its decoded text, might
-shift this. Cross-tokenizer logit distillation is the obvious next
-step but the engineering is real: two incompatible BPE schemes need
-either a byte-level alignment between teacher and student tokens or
-a soft-token bridge in the spirit of Boizard et al. 2024 (Universal
-Logit Distillation, arXiv:2402.12030).
+The one positive signal is multi-line. `fim_gold` and `fim_mellum` both
+beat base on multi-line HumanEval pass@1 (0.415 vs 0.396, +1.9pp each),
+and that's the subtask base is weakest on. The held-out codeparrot EM
+points the same way (base 0.000, fim_gold 0.067, fim_mellum 0.083,
+fim_mix 0.083). Multi-line is where the small fine-tune actually
+delivers something.
 
-The single positive signal is that fim_gold and fim_mellum *both*
-improve multi-line HumanEval pass@1 over base (0.415 vs 0.396, +1.9pp
-each). That's small but in the right direction, and multi-line is
-the FIM subtask the un-fine-tuned base is weakest on (single 0.787,
-multi 0.396, random 0.506). The held-out EM differences on
-codeparrot multi-line (base 0.000, fim_gold 0.067, fim_mellum 0.083,
-fim_mix 0.083) point the same way: multi-line is where the fine-tune
-produces the clearest gain.
+### RepoBench-Python next-line (the L2R regression check)
 
-### Third eval column: RepoBench-Python next-line (the L2R regression check)
-
-The HumanEval Infilling regression worried me because I couldn't
-distinguish "FIM training learned codeparrot style and slightly hurts
-out-of-distribution FIM" from "FIM training damaged the student's
-plain LM ability." So I added a third eval on the *other* benchmark
-Mellum's card reports: RepoBench-Python next-line prediction (Liu et
-al. 2023, `tianyang/repobench_python_v1.1`). Three subsets
-(`cross_file_first`, `cross_file_random`, `in_file`), 60 problems
-each at file lengths ≤ 8k, fixed seed shared across all five models.
-Score is edit-similarity (difflib ratio) between the model's first
-generated line and the canonical next line, plus exact-match for
-context.
+The HumanEval Infilling regression worried me because I couldn't tell
+apart "FIM training learned codeparrot style and hurts out-of-distribution
+FIM" from "FIM training damaged the student's plain LM ability." A
+third eval on the *other* benchmark Mellum's card reports settles it:
+RepoBench-Python next-line (Liu et al. 2023,
+`tianyang/repobench_python_v1.1`), three subsets, 60 problems each at
+file lengths ≤8k, fixed seed shared across models. Score is
+edit-similarity (difflib ratio) between the model's first generated
+line and the canonical next line.
 
 | method | cf_first | cf_random | in_file | avg ES | avg EM |
 |---|---|---|---|---|---|
@@ -609,75 +482,53 @@ context.
 | fim_mix 0.5B | 0.565 | 0.668 | **0.705** | 0.646 | 0.222 |
 | mellum_4b (FIM-wrap) | 0.474 | 0.553 | 0.505 | 0.511 | 0.178 |
 
-The four 0.5B variants land within 1.2 ES points of each other on
-the average and within 2 ES points on every subset. **FIM
-fine-tuning did not damage L2R LM ability.** This is the positive
-null I needed: combined with the HumanEval Infilling regression,
-the picture is "FIM students learned codeparrot-style FIM, didn't
-forget L2R, slightly hurt on FIM out-of-distribution," not "FIM
-students forgot how to be language models."
+The four 0.5B variants land within 1.2 ES on the average and within 2
+ES on every subset. **FIM fine-tuning did not damage L2R LM ability.**
+Combined with the HumanEval Infilling regression: FIM students learned
+codeparrot-style FIM, kept their L2R, slightly hurt out-of-distribution
+FIM. They didn't forget how to be language models.
 
-The Mellum row needs a caveat. My first run gave Mellum raw L2R
-prompts and it scored ES 0.470 — per-problem inspection showed
-Mellum hitting EOS in 1-2 tokens because Mellum-sft-python is
-FIM-only and a raw L2R prompt isn't a shape it knows what to do
-with. Re-running with the prompt wrapped as
-`<fim_suffix><fim_prefix>{code}<fim_middle>` (empty suffix, FIM as
-a degenerate next-token completion) gave the 0.511 in the table
-above. Even with FIM-wrap, Mellum is below the Qwen base. The
-Mellum card reports RepoBench Avg ≤8k = 0.299, which is roughly
-half my 0.511 number, so the published number isn't directly
-comparable to mine -- different RepoBench version, different
-file-length bucket, different cross-file context format. Mellum's
-training format probably uses `<filename>` / `<file_sep>` markers
-between context files that I'm not providing. I'd treat 0.511 as a
-loose lower bound on Mellum's RepoBench performance under my
-specific protocol, not as a comment on Mellum's actual capability.
+Mellum row caveat: my first run gave Mellum raw L2R prompts and it
+scored ES 0.470 because Mellum-sft-python is FIM-only and hits EOS in
+1-2 tokens on a raw L2R prompt. Re-running wrapped as
+`<fim_suffix><fim_prefix>{code}<fim_middle>` (empty suffix, FIM as a
+degenerate next-token completion) gave the 0.511 above. The Mellum
+card's published 0.299 isn't directly comparable (different RepoBench
+version, file-length bucket, and cross-file context format with
+`<filename>` / `<file_sep>` markers I'm not providing). Treat 0.511
+as a loose lower bound under my protocol, not a statement about
+Mellum's capability.
 
-### What I'd change
+## What I'd change next
 
-1. **Scale the seq-KD corpus.** 600 examples is way too few. Bavarian
-   et al. (2022) get FIM capability from training on billions of FIM
-   tokens; I should be at 50K-500K examples minimum to expect fine-tune
-   to beat what Qwen already learned.
-2. **Use FIM-format-friendly data.** codeparrot files are real GitHub
-   repos with messy structure; HumanEval is curated short Python
-   functions. The training distribution should match the eval
-   distribution at least roughly. MBPP-Plus or
-   bigcode/code-search-net would be a closer match.
-3. **Cross-tokenizer logit distillation.** Sequence-level KD throws
-   away the per-token uncertainty information. ULD (Boizard et al.
-   2024, arXiv:2402.12030) projects across incompatible tokenizers
-   and preserves more of the teacher signal than text-level
-   pseudo-labelling. Worth trying if seq-KD really is the bottleneck.
-4. **Stop training earlier.** All three FIM trainings overfit. Val
-   middle NLL at steps 300/600/900/1200 is 0.91/0.95/0.98/0.98 for
-   gold, 0.96/1.01/1.04/1.04 for mellum, 0.92/0.97/1.00/1.01 for mix --
-   monotonically up after step 300 in every run. I should have
-   checkpointed every 100 steps and selected the best, not the last.
-   Probably 30-40% of the HumanEval gap to base is recoverable from
-   this alone.
+The cheapest fix for the FIM follow-up is early stopping. All three
+trainings overfit: val middle NLL at steps 300/600/900/1200 is
+0.91/0.95/0.98/0.98 for gold, 0.96/1.01/1.04/1.04 for mellum,
+0.92/0.97/1.00/1.01 for mix, monotonically up after step 300 in every
+run. Checkpointing every 100 steps and picking the best by val NLL
+probably recovers 30-40% of the HumanEval gap. Beyond that, the
+seq-KD corpus needs to be 50K-500K examples, not 600, and on a corpus
+that matches the eval distribution (HumanEval-style short functions,
+not real GitHub repos with messy structure).
 
-## What I'd do with another week beyond that
+For the main spec-decode line, the changes that would actually move
+the rkl-vs-fkl ranking, in expected-payoff order:
 
-In rough order of expected payoff:
-
-1. **Length-normalised reward** in the on-policy reverse KL, the actual
+1. Length-normalised reward in the on-policy reverse KL, the actual
    MiniLLM section 3.3 algorithm. Naive on-policy drifts because
    teacher reward at long rollouts is dominated by easy positions;
-   length-normalising stops the student collapsing onto whichever mode
-   the teacher rewards on average. The cheapest single change with the
-   biggest expected effect on the reverse-KL ranking.
-
-2. **DistillSpec.** Train against the per-token acceptance probability
-   under the spec-decode rule directly, with a stop-gradient through the
-   teacher. That's the loss whose units match the metric the eval
-   actually discriminates on.
-
-3. **A bigger teacher gap inside the Qwen family.** 1.5B → 0.5B is 3×;
-   the reverse-KL effect should sharpen at 7B → 0.5B. Same-tokenizer
-   drop-in. (I deliberately skipped this for now because it doesn't
-   bring the experiment closer to Mellum, just sharpens the proxy.)
+   length-normalising stops the student collapsing onto whichever
+   mode the teacher rewards on average. Cheapest single change.
+2. DistillSpec: train against per-token acceptance probability
+   directly, stop-gradient through the teacher. Units match the
+   metric.
+3. Wider teacher-student gap inside the Qwen family. 1.5B → 0.5B is
+   3×; the reverse-KL effect should sharpen at 7B → 0.5B. Skipped
+   here because it sharpens the proxy without bringing it closer to
+   Mellum.
+4. Cross-tokenizer logit KD via ULD or byte-alignment, so the
+   Mellum-as-teacher seq-KD has access to per-token uncertainty
+   instead of just decoded text.
 
 ## How to repro
 
@@ -693,32 +544,22 @@ uv run python spec_eval.py --K 4 --max-drafts 8 --eval-seed 42        # hardened
 uv run python make_table.py                                           # prints the markdown
 ```
 
-Total wall on a single RTX 4090 sharing the box: about three hours of
-training + eval. `results/train_*.json` has per-step training curves,
-`results/eval.json` has the first-pass aggregate eval,
-`results/spec_eval.json` has the hardened spec-decode numbers including
-per-position acceptance and bootstrap CIs.
+Total wall on a single RTX 4090 (shared with another job): about three
+hours. `results/train_*.json` has per-step training curves,
+`results/eval.json` the first-pass aggregate, `results/spec_eval.json`
+the hardened spec-decode numbers with per-position acceptance and
+bootstrap CIs.
 
 ## Things I'd want a Mellum engineer to push back on
 
-1. The reverse-KL effect I see is small at 1.5B → 0.5B and only shows
-   significantly against the CE baseline. The per-position figure says
-   the mechanism is alive but the q4 bucket (where it lives) is only
-   a quarter of positions, so it gets diluted. At 4B → sub-1B with a
-   bigger entropy gap, does the q4 effect cleanly dominate, or do you
-   see the same "swamped by easy positions" problem?
-2. Is spec-decode draft length the right student-side metric for Mellum's
-   actual deployment? My read of the public posts is that Mellum stands
-   alone (no separate verifier model in the IDE), so the latency lever
-   is the model's own forward-pass time and acceptance is the user's
-   "did I keep this completion." If that's right, the right loss is closer
-   to "expected number of tokens before the user starts editing,"
-   which is harder to target offline but is presumably what the
-   user-facing telemetry measures.
-3. How much of Mellum's quality is the distillation objective vs the data
-   curation and the FIM training? The public posts emphasise data and
-   FIM. My result that "any KL distillation > CE" is a small effect
-   that survives statistical rigour but is much smaller than the
-   teacher-student capability gap (HumanEval pass@1 0.427 vs 0.274), so
-   the lever I observe is real but bounded. I'd like to know whether
-   internal numbers say the same.
+1. At 1.5B → 0.5B the reverse-KL win sits almost entirely in the q4
+   bucket, which is only a quarter of positions, so it gets diluted. At
+   4B → sub-1B with a bigger entropy gap, does q4 dominate, or do the
+   easy positions still swamp it?
+2. Is spec-decode draft length the right student-side metric for Mellum
+   at all? My read of the public posts is that Mellum runs alone in the
+   IDE with no separate verifier, so the latency lever is the model's
+   own forward-pass time and "acceptance" is whether the user kept the
+   completion. If so, the right offline loss is closer to "expected
+   tokens before the user edits," which is harder to target without
+   the telemetry.

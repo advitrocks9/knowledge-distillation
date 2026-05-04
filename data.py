@@ -1,11 +1,11 @@
 """
 Build a Python training corpus for distillation.
 
-The Stack-smol has a Python subset. We pull N samples, drop very-short ones,
-truncate to a fixed sequence length, and pack into a tensor on disk.
-
-Why pack on disk: the teacher and student share the same Qwen2.5 tokenizer
-so we tokenize once and reuse the .pt file across every distillation run.
+Pulls N samples from codeparrot-clean-valid, drops very-short ones,
+truncates to a fixed sequence length, and packs into a tensor on disk.
+Teacher and student share the Qwen2.5 tokenizer, so tokenisation
+happens once here and the .pt files get reused across every
+distillation run.
 """
 
 from __future__ import annotations
