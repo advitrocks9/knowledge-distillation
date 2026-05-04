@@ -1,0 +1,40 @@
+{
+  "method": "marginal_upper_bound",
+  "n_prompts": 164,
+  "n_boot": null,
+  "pairs": [
+    {
+      "method": "marginal_upper_bound",
+      "n_prompts": 164,
+      "delta_mean": 0.21366709570545783,
+      "ci95_lo": 0.07002718325220086,
+      "ci95_hi": 0.3573070081587148,
+      "sigma_a": 0.6862162808662232,
+      "sigma_b": 0.640272632442121,
+      "sigma_delta_upper": 0.938531740528915,
+      "pair": "student_rkl - student_ce"
+    },
+    {
+      "method": "marginal_upper_bound",
+      "n_prompts": 164,
+      "delta_mean": 0.20303554788647693,
+      "ci95_lo": 0.063818042832675,
+      "ci95_hi": 0.34225305294027886,
+      "sigma_a": 0.6461337010938791,
+      "sigma_b": 0.640272632442121,
+      "sigma_delta_upper": 0.9096360830264143,
+      "pair": "student_gkd - student_ce"
+    },
+    {
+      "method": "marginal_upper_bound",
+      "n_prompts": 164,
+      "delta_mean": 0.11814053148384174,
+      "ci95_lo": -0.023780653874251073,
+      "ci95_hi": 0.2600617168419346,
+      "sigma_a": 0.6707752426588109,
+      "sigma_b": 0.640272632442121,
+      "sigma_delta_upper": 0.9273017146637603,
+      "pair": "student_fkl - student_ce"
+    }
+  ]
+}

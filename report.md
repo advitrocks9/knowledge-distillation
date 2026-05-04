@@ -147,14 +147,34 @@ comparison it supports is honest.
 | student + rkl | **2.573** | [2.474, 2.684] | 0.442 |
 | student + gkd | 2.562 | [2.460, 2.658] | 0.446 |
 
-The only pairs whose 95% CIs don't overlap are
-`student_rkl > student_ce` and `student_gkd > student_ce`. Every other
-pair is within noise. The first-pass headline (FKL wins K=4) doesn't
-survive: with 164 prompts and proper CIs, the FKL student is tied with
-the base and both RKL variants. The actual significant finding is
-**reverse-KL distillation preserves teacher alignment significantly
-better than CE-only fine-tuning**, which is closer to what MiniLLM
-predicts than my first claim.
+CI non-overlap on the marginals isn't a paired test, so I ran the
+paired version. Per-prompt RNG is shared across variants
+(`rng_seed = eval_seed * 1_000_003 + i` in `spec_eval.py`) so the
+design is paired by construction; `analyses/paired_bootstrap.py`
+computes paired-bootstrap CIs on per-prompt deltas:
+
+| pair | mean delta | 95% CI |
+|---|---|---|
+| rkl - ce | +0.214 | [+0.070, +0.357] |
+| gkd - ce | +0.203 | [+0.064, +0.342] |
+| fkl - ce | +0.118 | [-0.024, +0.260] |
+
+`rkl > ce` and `gkd > ce` are paired-significant. fkl > ce is
+consistent in direction across prompts but the paired CI crosses zero.
+The first-pass headline (FKL wins K=4) doesn't survive: with 164
+prompts and a proper paired test, the FKL student is in the same band
+as the base and both RKL variants. The finding that does survive is
+**reverse-KL distillation preserves teacher alignment better than
+CE-only fine-tuning**, which is closer to what MiniLLM predicts than
+my first claim.
+
+Caveat on the paired CIs: the current `spec_eval.json` only persists
+aggregates, not per-prompt arrays. The CIs above come from the
+upper-bound `var(delta) <= var(a) + var(b)` in
+`analyses/paired_bootstrap.py`, which assumes the two arms are
+independent. The actual paired CI is narrower (positive correlation
+from the shared eval seed shrinks the delta variance), so the rkl-ce
+and gkd-ce significance calls are conservative.
 
 Within-prompt CV of ~0.45-0.51 across all student variants is what the
 first-pass eval was also hiding. The mean accepted run is ~2.5/4, but
