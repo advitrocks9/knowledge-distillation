@@ -66,6 +66,7 @@ def run_pipeline(
     skip_train: bool = False,
     skip_fim_eval: bool = False,
     skip_humaneval: bool = False,
+    skip_repobench: bool = False,
 ) -> dict:
     """End-to-end FIM seq-KD pipeline."""
     import subprocess
@@ -156,6 +157,15 @@ def run_pipeline(
              "--mellum", MELLUM,
              "--n-problems", "164",
              "--max-new", "256"], "humaneval infilling")
+        save_to_volume()
+
+    # 6. RepoBench-Python -- next-line pred, the *other* published mellum number
+    if not skip_repobench:
+        run([sys.executable, "repobench_python.py",
+             "--student-base", QWEN_05B,
+             "--mellum", MELLUM,
+             "--n-per-subset", "60",
+             "--max-new", "64"], "repobench python")
 
     save_to_volume()
     print("\n=== done. results saved to volume kd-fim-results ===")
@@ -195,6 +205,7 @@ def main(
     skip_train: bool = False,
     skip_fim_eval: bool = False,
     skip_humaneval: bool = False,
+    skip_repobench: bool = False,
 ) -> None:
     fc = run_pipeline.spawn(
         skip_data=skip_data,
@@ -202,6 +213,7 @@ def main(
         skip_train=skip_train,
         skip_fim_eval=skip_fim_eval,
         skip_humaneval=skip_humaneval,
+        skip_repobench=skip_repobench,
     )
     print(f"spawned function call: {fc.object_id}")
     print("function continues running on Modal even if this client exits")
