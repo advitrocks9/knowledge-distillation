@@ -15,9 +15,10 @@ the reconstructed solution.
 Notes on this script:
 
   - I sub-sample each config to keep modal compute under budget. Running
-    the full 8488 problems × 5 models would be ~12h on A10G; 100 problems
+    the full 8488 problems × 5 models would be ~12h on A10G; 164 problems
     per config keeps it under an hour while still giving a defensible
-    sample size with the caveats stated in the report.
+    sample size with the caveats stated in the report. (164 matches the
+    HumanEval prompt count used in spec_eval.py for symmetry.)
 
   - Need datasets==3.6.0 with trust_remote_code=True because the dataset
     uses a loader script that newer datasets versions deprecated.
