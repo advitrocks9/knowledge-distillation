@@ -1,24 +1,27 @@
 """
-Evaluate each student on:
-  1. HumanEval pass@1                       -- the user-facing metric.
-  2. Held-out NLL on the val corpus         -- the loss-shaped metric.
-  3. Speculative-decoding draft acceptance  -- the latency-shaped metric.
+First-pass eval. Each student is scored on:
+  - HumanEval pass@1
+  - held-out NLL on the val corpus
+  - speculative-decoding draft acceptance length (student drafts, teacher
+    verifies). Per Leviathan et al. (2023, arXiv:2211.17192), the
+    probability of accepting a drafted token x is min(1, p_T(x)/p_S(x)),
+    and expected accepted run length is the wall-clock-relevant quantity
+    for inference-cost-bound code models like Mellum.
 
-For (3), the student is the drafter and the teacher is the verifier. Per
-Leviathan et al. (2023, arXiv:2211.17192), the probability of accepting a
-drafted token x at a position is min(1, p_T(x) / p_S(x)). Expected accepted
-run length is the latency-relevant quantity for inference-cost-bound code
-models -- i.e. exactly the regime Mellum is in.
+The hardened spec-decode eval (164 prompts, bootstrap CIs, per-position
+acceptance) lives in spec_eval.py; this script's spec-decode column is
+kept for reference because it's what the report's first-pass section
+walks through.
 """
 
 from __future__ import annotations
 from pathlib import Path
 import argparse
 import json
-import re
-import signal
+import os
 import subprocess
 import sys
+import tempfile
 import time
 import torch
 import torch.nn.functional as F
@@ -47,17 +50,28 @@ def truncate_at_stops(text: str) -> str:
 
 def run_one_humaneval(prompt: str, completion: str, test: str, entry: str) -> bool:
     """Execute prompt + completion + test in a subprocess with a hard timeout.
-    Returns True iff the test runs without raising."""
+
+    Generated code is untrusted, so the subprocess runs with python -I
+    (isolated mode: no PYTHON* env, no user site-packages, no implicit cwd
+    on sys.path) inside a fresh tempdir, with a fixed PYTHONHASHSEED so
+    HumanEval's check() is deterministic. This isn't a real sandbox -- the
+    test program can still touch the filesystem and the network -- but it
+    keeps stray files out of the repo and stops the program from reaching
+    sibling modules in this directory."""
     program = prompt + completion + "\n" + test + f"\ncheck({entry})\n"
-    try:
-        out = subprocess.run(
-            [sys.executable, "-c", program],
-            capture_output=True,
-            timeout=8,
-            text=True,
-        )
-    except subprocess.TimeoutExpired:
-        return False
+    with tempfile.TemporaryDirectory() as td:
+        env = {**os.environ, "PYTHONHASHSEED": "0"}
+        try:
+            out = subprocess.run(
+                [sys.executable, "-I", "-c", program],
+                capture_output=True,
+                timeout=8,
+                text=True,
+                cwd=td,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            return False
     return out.returncode == 0
 
 
@@ -237,8 +251,13 @@ def evaluate_one(
     teacher = AutoModelForCausalLM.from_pretrained(teacher_path, dtype=torch.bfloat16).to(device)
     teacher.eval()
     prompts_he = [ex["prompt"] for ex in load_dataset("openai_humaneval", split="test").select(range(min(32, args.he_problems)))]
+    # Symmetric max_drafts across K so the per-prompt sample size is the same.
+    # The original first-pass eval used max_drafts=4 for K=2 and 2 for K=4,
+    # which gave the K=2 column twice as many cycles per prompt and was part
+    # of why the K=2 / K=4 signs disagreed. The hardened eval in spec_eval.py
+    # is what the report leans on; this script kept for historical compare.
     sd2 = spec_decode(student, teacher, prompts_he, tok, draft_len=2, max_drafts=4, temperature=1.0, device=device)
-    sd4 = spec_decode(student, teacher, prompts_he, tok, draft_len=4, max_drafts=2, temperature=1.0, device=device)
+    sd4 = spec_decode(student, teacher, prompts_he, tok, draft_len=4, max_drafts=4, temperature=1.0, device=device)
     print(f"  spec-decode K=2 mean run: {sd2['mean_accepted_run_length']:.3f} / 2")
     print(f"  spec-decode K=4 mean run: {sd4['mean_accepted_run_length']:.3f} / 4")
 
