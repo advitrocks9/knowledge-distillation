@@ -47,11 +47,24 @@ def edit_similarity(a: str, b: str) -> float:
 
 
 def build_prompt(ex: dict) -> str:
-    cfc = ex.get("cross_file_context") or ""
-    code = ex.get("code") or ex.get("file_prefix") or ""
-    if cfc:
-        return cfc + "\n" + code
-    return code
+    """Format the same way the RepoBench paper concatenates cross-file context:
+    snippet blocks first (each labelled by source path), then the in-file
+    imports, then the cropped code that ends right before next_line."""
+    parts: list[str] = []
+    for snip in (ex.get("context") or []):
+        path = snip.get("path", "")
+        body = snip.get("snippet", "")
+        if not body:
+            continue
+        parts.append(f"# {path}\n{body}")
+    if parts:
+        cross = "\n\n".join(parts) + "\n\n"
+    else:
+        cross = ""
+    file_hdr = f"# {ex.get('file_path', '')}\n"
+    imp = ex.get("import_statement") or ""
+    code = ex.get("cropped_code") or ""
+    return cross + file_hdr + imp + ("\n" if imp and not imp.endswith("\n") else "") + code
 
 
 @torch.no_grad()
@@ -62,6 +75,7 @@ def eval_one_model(
     subsets_data: dict[str, list[dict]],
     max_new: int,
     device,
+    is_mellum: bool = False,
 ) -> dict:
     print(f"\n=== {name} ({path}) ===")
     tok = AutoTokenizer.from_pretrained(tok_path)
@@ -78,6 +92,12 @@ def eval_one_model(
         t0 = time.time()
         for ex in rows:
             prompt = build_prompt(ex)
+            if is_mellum:
+                # mellum-sft-python is FIM-only; raw L2R prompts make it hit
+                # EOS immediately. Wrap as FIM with an empty suffix so it
+                # behaves like a code-completion request, not a "predict next
+                # token outside any FIM scaffold" request.
+                prompt = f"<fim_suffix><fim_prefix>{prompt}<fim_middle>"
             ids = tok(prompt, return_tensors="pt", truncation=True, max_length=8192).input_ids.to(device)
             gen = model.generate(
                 ids,
@@ -116,34 +136,19 @@ def eval_one_model(
     return out
 
 
-def load_subsets(n_per_subset: int, max_file_tokens: int, seed: int) -> dict[str, list[dict]]:
-    """Load the three RepoBench subsets, filter to ≤ max_file_tokens, subsample."""
+def load_subsets(n_per_subset: int, levels: tuple[str, ...], seed: int) -> dict[str, list[dict]]:
+    """Load the three RepoBench subsets (splits in the default config),
+    filter rows to the listed difficulty levels (≤8k means 2k/4k/8k),
+    subsample n_per_subset with a fixed seed shared across model runs."""
     rng = random.Random(seed)
     out: dict[str, list[dict]] = {}
     for sub in SUBSETS:
-        # tianyang/repobench_python_v1.1 ships configs as `<subset>_2k`, `<subset>_4k`, `<subset>_8k`, etc.
-        # ≤8k means we pull 2k + 4k + 8k buckets and pool them.
-        buckets = ["2k", "4k", "8k"]
-        rows: list[dict] = []
-        for b in buckets:
-            try:
-                ds = load_dataset("tianyang/repobench_python_v1.1", f"{sub}_{b}", split="train", trust_remote_code=True)
-            except Exception as e:
-                print(f"  fallback for {sub}_{b}: {e!r}")
-                try:
-                    ds = load_dataset("tianyang/repobench_python_v1.1", f"{sub}_{b}", split="test", trust_remote_code=True)
-                except Exception as e2:
-                    print(f"  also failed: {e2!r}")
-                    continue
-            rows.extend(ds.to_list() if hasattr(ds, "to_list") else [dict(r) for r in ds])
-        if not rows:
-            print(f"  WARN: no rows for {sub}")
-            out[sub] = []
-            continue
+        ds = load_dataset("tianyang/repobench_python_v1.1", split=sub)
+        rows = [dict(r) for r in ds if r.get("level") in levels]
         rng.shuffle(rows)
         rows = rows[:n_per_subset]
         out[sub] = rows
-        print(f"loaded {sub}: {len(rows)} examples")
+        print(f"loaded {sub}: {len(rows)} examples (levels={levels})")
     return out
 
 
@@ -154,13 +159,17 @@ def main() -> None:
     ap.add_argument("--mellum", default="/models/mellum-sft-python")
     ap.add_argument("--out", type=Path, default=Path("results/repobench_python.json"))
     ap.add_argument("--n-per-subset", type=int, default=60)
-    ap.add_argument("--max-file-tokens", type=int, default=8192)
+    ap.add_argument("--levels", default="2k,4k,8k",
+                    help="comma-separated difficulty levels to keep (mellum card reports avg over <=8k)")
     ap.add_argument("--max-new", type=int, default=64)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--only", default="",
+                    help="comma-separated subset of run names to evaluate (default: all)")
     args = ap.parse_args()
 
     device = torch.device("cuda")
-    subsets_data = load_subsets(args.n_per_subset, args.max_file_tokens, args.seed)
+    levels = tuple(s.strip() for s in args.levels.split(",") if s.strip())
+    subsets_data = load_subsets(args.n_per_subset, levels, args.seed)
 
     runs = [
         ("base",       args.student_base),
@@ -169,17 +178,27 @@ def main() -> None:
         ("fim_mix",    str(args.ckpt_dir / "student_fim_mix")),
         ("mellum_4b",  args.mellum),
     ]
-    out: dict = {
-        "args": {"n_per_subset": args.n_per_subset, "max_file_tokens": args.max_file_tokens,
-                 "max_new": args.max_new, "seed": args.seed},
-        "subset_sizes": {s: len(subsets_data[s]) for s in SUBSETS},
-    }
+    only = {s.strip() for s in args.only.split(",") if s.strip()}
+    if args.out.exists() and only:
+        # merge into existing results so re-running a subset doesn't drop the rest
+        out = json.loads(args.out.read_text())
+        out["args"] = {"n_per_subset": args.n_per_subset, "levels": args.levels,
+                       "max_new": args.max_new, "seed": args.seed}
+    else:
+        out = {
+            "args": {"n_per_subset": args.n_per_subset, "levels": args.levels,
+                     "max_new": args.max_new, "seed": args.seed},
+            "subset_sizes": {s: len(subsets_data[s]) for s in SUBSETS},
+        }
     for name, path in runs:
+        if only and name not in only:
+            continue
         if not Path(path).exists():
             print(f"missing {path}, skip")
             continue
-        tok_path = args.mellum if "mellum" in name.lower() and "fim_mellum" not in name.lower() else args.student_base
-        out[name] = eval_one_model(name, path, tok_path, subsets_data, args.max_new, device)
+        is_mellum = "mellum" in name.lower() and "fim_mellum" not in name.lower()
+        tok_path = args.mellum if is_mellum else args.student_base
+        out[name] = eval_one_model(name, path, tok_path, subsets_data, args.max_new, device, is_mellum=is_mellum)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(out, indent=2))
