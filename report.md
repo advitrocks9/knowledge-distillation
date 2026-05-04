@@ -275,7 +275,21 @@ survival-weighted compound is:
 
 Two methods with the same mean β can have different K=4 numbers if one
 puts its acceptance budget early and the other late.
-`analyses/predict_specdecode.py` plugs the per-position β into this:
+`analyses/predict_specdecode.py` reads β_1..β_4 from the per-position
+field of `results/spec_eval.json` (the **first-block empirical
+acceptance** rates from the spec-decode run, i.e. the same `min(1,
+p_T/p_S)` quantity averaged across prompts at each draft position) and
+plugs them into the compound:
+
+Note that this is *not* the entropy-bucketed TV table from
+`results/per_position.json`. Both quantities are `1 - TV` at the
+per-position level (Leviathan Corollary 3.6 again), but the
+entropy-bucketed table conditions on teacher entropy buckets to
+visualise the loss-shape effect, whereas the prediction here is
+conditioned on draft position 1..4 and computed directly on the K=4
+spec-decode prompts. The per_position.json view shows *where* (which
+entropy bucket) the loss variants drift; this prediction shows
+*whether* the per-position drift compounds into the K=4 mean.
 
 | run | predicted E[run/4] | observed run/4 |
 |---|---|---|
