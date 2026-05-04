@@ -48,6 +48,14 @@ RKL mean 2.584 (seed std 0.023). The gap (+0.206) is ~10x the larger
 of the two seed SDs. With n=3 per arm I wouldn't claim more than that.
 See `results/spec_eval_seeds.json`.
 
+The numbers above are from the analytical per-block expectation
+`E[L] = sum_i prod_{j<=i} a_j` (cheaper, less noisy on a 4090 budget).
+I ran the bit-exact rejection-sampling version on Modal as a sanity
+check (`spec_eval_rejection.py`, all six models, results in
+`results/spec_eval_rejection.json`); every analytic value sits inside
+the sampled 95% CI and the ranking is identical. Side-by-side in
+`analyses/compare_rejection_vs_analytic.py`.
+
 The first-pass eval (32 prompts, no CIs, in `results/eval.json`) had me
 write that forward KL won this column. That story didn't survive 164
 prompts. The actual finding is **reverse-KL distillation preserves

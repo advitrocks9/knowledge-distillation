@@ -144,6 +144,27 @@ the per-position numbers (which are just the acceptance probabilities
 themselves) are bit-exact either way. Not bit-exact Leviathan, but the
 comparison it supports is honest.
 
+To check that I ran the bit-exact rejection-sampling version on Modal
+(`spec_eval_rejection.py`, A100, all six models, same prompts and seeds)
+and compared row-by-row in `analyses/compare_rejection_vs_analytic.py`:
+
+| model | analytic | sampled | sampled 95% CI | delta |
+|---|---:|---:|---|---:|
+| teacher_self  | 3.980 | 3.983 | [3.973, 3.992] | +0.003 |
+| student_base  | 2.517 | 2.478 | [2.360, 2.603] | -0.039 |
+| student_ce    | 2.359 | 2.329 | [2.216, 2.441] | -0.030 |
+| student_fkl   | 2.477 | 2.402 | [2.268, 2.518] | -0.075 |
+| student_rkl   | 2.573 | 2.512 | [2.390, 2.627] | -0.060 |
+| student_gkd   | 2.562 | 2.558 | [2.433, 2.684] | -0.004 |
+
+Every analytic value sits inside the sampled CI; the ranking is
+identical (rkl ≥ gkd > base > fkl > ce in both columns). The teacher
+self-spec sanity check matches (3.980 vs 3.983, both ~K=4). I read
+this as: the analytical shortcut was the right move on a 4090 budget
+and the headline numbers above don't need to change. Code in
+`spec_eval_rejection.py` and `analyses/compare_rejection_vs_analytic.py`,
+results in `results/spec_eval_rejection.json`.
+
 ### Hardened spec-decode results, K=4
 
 | run | mean accepted run / 4 | 95% CI | within-prompt CV |
