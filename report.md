@@ -74,6 +74,14 @@ hyperparameters:
 normalisation, no policy-gradient surrogate, no teacher-forced mixing. It's
 "what's the smallest change that puts the student on its own trajectory."
 
+My GKD variant is on-policy on the suffix only -- the first 64 tokens
+are teacher-forced from the corpus (`cfg.rollout_prompt_len` in
+`distill.py`), the continuation is student-sampled, and the reverse-KL
+loss is computed only on the sampled suffix. This is cheaper than
+MiniLLM's full rollouts but loses the early-position drift signal,
+which is the half of the trajectory where the student's own
+distribution-shift would show up first.
+
 ## Results
 
 ### First pass
