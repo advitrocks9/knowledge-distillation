@@ -44,8 +44,9 @@ per-prompt deltas are positively correlated by the shared seed.
 
 Three-seed retraining of CE and RKL (the pair that survived the
 single-seed eval) confirms the gap: CE mean 2.378 (seed std 0.008),
-RKL mean 2.584 (seed std 0.023), effect size ~12 pooled SDs. See
-`results/spec_eval_seeds.json`.
+RKL mean 2.584 (seed std 0.023). The gap (+0.206) is ~10x the larger
+of the two seed SDs. With n=3 per arm I wouldn't claim more than that.
+See `results/spec_eval_seeds.json`.
 
 The first-pass eval (32 prompts, no CIs, in `results/eval.json`) had me
 write that forward KL won this column. That story didn't survive 164
