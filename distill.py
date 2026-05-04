@@ -49,6 +49,10 @@ class Cfg:
     rollout_new: int = 64
     seed: int = 0
     log_every: int = 50
+    # Lost a 2150/2500 gkd run to Modal preemption once. Save full state
+    # (model, optimizer, scheduler, RNG, step, log) every checkpoint_every
+    # steps so the next preemption costs at most one window.
+    checkpoint_every: int = 250
 
 
 def cosine_warmup(opt: torch.optim.Optimizer, warmup: int, total: int) -> LambdaLR:
@@ -141,6 +145,39 @@ def eval_perplexity(
     return total_loss / max(total_tokens, 1.0)
 
 
+def _partial_dir(cfg: Cfg) -> Path:
+    return cfg.out_dir / f"student_{cfg.loss}_partial"
+
+
+def _save_checkpoint(
+    cfg: Cfg, step: int, student, opt, sched, rng, log: dict, t_offset: float
+) -> None:
+    d = _partial_dir(cfg)
+    d.mkdir(parents=True, exist_ok=True)
+    student.save_pretrained(d / "model")
+    torch.save({
+        "optimizer": opt.state_dict(),
+        "scheduler": sched.state_dict(),
+        "rng": rng.get_state(),
+        "torch_rng": torch.get_rng_state(),
+        "cuda_rng": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+    }, d / "trainer.pt")
+    (d / "meta.json").write_text(json.dumps({
+        "step": step,
+        "t_offset": t_offset,
+        "log": log,
+    }))
+
+
+def _try_resume(cfg: Cfg) -> dict | None:
+    d = _partial_dir(cfg)
+    if not (d / "meta.json").exists() or not (d / "trainer.pt").exists():
+        return None
+    meta = json.loads((d / "meta.json").read_text())
+    print(f"[resume] partial checkpoint at step {meta['step']}, loading")
+    return meta
+
+
 def distill(cfg: Cfg) -> dict:
     torch.manual_seed(cfg.seed)
     device = torch.device("cuda")
@@ -148,8 +185,12 @@ def distill(cfg: Cfg) -> dict:
     tok = AutoTokenizer.from_pretrained(cfg.student)
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
 
+    resumed = _try_resume(cfg)
+    student_src = (
+        str(_partial_dir(cfg) / "model") if resumed is not None else cfg.student
+    )
     student = AutoModelForCausalLM.from_pretrained(
-        cfg.student, torch_dtype=torch.bfloat16
+        student_src, torch_dtype=torch.bfloat16
     ).to(device)
     student.gradient_checkpointing_enable()
     student.train()
@@ -181,18 +222,34 @@ def distill(cfg: Cfg) -> dict:
     n_train = train_ids.size(0)
 
     log: dict = {"step": [], "train_loss": [], "val_nll": [], "wallclock_s": []}
-    t0 = time.time()
-    val0 = eval_perplexity(student, val_ids, pad_id, batch=cfg.batch_size)
-    print(f"step 0  val_nll={val0:.4f}")
-    log["step"].append(0)
-    log["train_loss"].append(None)
-    log["val_nll"].append(val0)
-    log["wallclock_s"].append(0.0)
+    t_offset = 0.0
+    start_step = 1
+    if resumed is not None:
+        trainer = torch.load(_partial_dir(cfg) / "trainer.pt")
+        opt.load_state_dict(trainer["optimizer"])
+        sched.load_state_dict(trainer["scheduler"])
+        rng.set_state(trainer["rng"])
+        torch.set_rng_state(trainer["torch_rng"])
+        if trainer["cuda_rng"] is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state(trainer["cuda_rng"])
+        log = resumed["log"]
+        t_offset = float(resumed["t_offset"])
+        start_step = int(resumed["step"]) + 1
+        print(f"[resume] starting at step {start_step}, t_offset={t_offset:.0f}s")
+
+    t0 = time.time() - t_offset
+    if resumed is None:
+        val0 = eval_perplexity(student, val_ids, pad_id, batch=cfg.batch_size)
+        print(f"step 0  val_nll={val0:.4f}")
+        log["step"].append(0)
+        log["train_loss"].append(None)
+        log["val_nll"].append(val0)
+        log["wallclock_s"].append(0.0)
 
     accum = 0
     accum_loss = 0.0
     opt.zero_grad(set_to_none=True)
-    for step in range(1, cfg.steps + 1):
+    for step in range(start_step, cfg.steps + 1):
         idx = torch.randint(0, n_train, (cfg.batch_size,), generator=rng)
         batch = train_ids[idx].to(device, non_blocking=True)
 
@@ -262,6 +319,10 @@ def distill(cfg: Cfg) -> dict:
             log["val_nll"].append(v)
             log["wallclock_s"].append(wc)
 
+        if cfg.checkpoint_every > 0 and step % cfg.checkpoint_every == 0 and step != cfg.steps:
+            _save_checkpoint(cfg, step, student, opt, sched, rng, log, t_offset=time.time() - t0)
+            print(f"[ckpt] step {step} -> {_partial_dir(cfg)}", flush=True)
+
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
     student.save_pretrained(cfg.out_dir / f"student_{cfg.loss}")
     log_path = Path("results") / f"train_{cfg.loss}.json"
@@ -269,6 +330,13 @@ def distill(cfg: Cfg) -> dict:
     log_path.write_text(json.dumps({"cfg": {**asdict(cfg), "train_pt": str(cfg.train_pt), "val_pt": str(cfg.val_pt), "out_dir": str(cfg.out_dir)}, "log": log}, indent=2, default=str))
     print(f"saved log -> {log_path}")
     print(f"saved student -> {cfg.out_dir / f'student_{cfg.loss}'}")
+
+    # final checkpoint exists, drop the partial dir
+    pd = _partial_dir(cfg)
+    if pd.exists():
+        import shutil
+        shutil.rmtree(pd, ignore_errors=True)
+        print(f"[ckpt] cleared {pd}")
     return log
 
 
@@ -282,6 +350,7 @@ def main() -> None:
     ap.add_argument("--out-dir", type=Path, default=Path("checkpoints"))
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--eval-every", type=int, default=500)
+    ap.add_argument("--checkpoint-every", type=int, default=250)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--grad-accum", type=int, default=2)
     ap.add_argument("--lr", type=float, default=2e-5)
@@ -298,6 +367,7 @@ def main() -> None:
         out_dir=args.out_dir,
         steps=args.steps,
         eval_every=args.eval_every,
+        checkpoint_every=args.checkpoint_every,
         batch_size=args.batch_size,
         grad_accum=args.grad_accum,
         lr=args.lr,
