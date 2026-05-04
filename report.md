@@ -468,50 +468,142 @@ Three things this updates me on, in priority order:
   but a real run would want to deduplicate by file hash plus a near-dup
   filter before tokenising.
 
-## In flight: Mellum-as-teacher seq-KD
+## Mellum-as-teacher seq-KD: did it work?
 
-The most obvious gap in this writeup is that I keep talking about
-Mellum and never use it. The follow-up I'd built code for and was
-running when the GPU box went unreachable mid-eval is a cross-tokenizer
-sequence-level distillation: have Mellum-4b-sft-python generate FIM
-completions on a Python corpus, retokenize the text in Qwen's tokenizer,
-and SFT Qwen2.5-Coder-0.5B on (prefix, mellum-middle, suffix) with loss
-masked to the middle. This is Kim & Rush 2016 style seq-KD; once
-tokenizers don't match, you can't do logit distillation, only
-pseudo-labelling.
+The most obvious gap in the original Qwen-on-Qwen writeup was that I
+kept talking about Mellum and never used it. The follow-up I built --
+ran on Modal with $30 of credits after the lab GPU box went down -- is
+a cross-tokenizer sequence-level distillation. Mellum-4b-sft-python
+generates FIM completions on a Python corpus, those text targets get
+re-tokenized in Qwen, and Qwen2.5-Coder-0.5B is SFT'd on (prefix,
+mellum-middle, suffix) with loss masked to the middle. This is Kim &
+Rush 2016 sequence-level KD; once tokenizers don't match, you can't do
+logit distillation, only pseudo-labelling.
 
-The conditions I designed (after a code-review pass; see
-`notes/levelup2-rescue.md`):
+Five conditions, after a design pass that put a gold-FIM control at the
+mandatory level (without it I can't tell whether any improvement comes
+from Mellum or just from teaching Qwen the FIM task format on this
+specific corpus distribution):
 
-- `base`            -- untouched Qwen with the FIM prompt format. Lower
-  bound.
-- `fim_gold`        -- SFT on real (prefix, ground-truth-middle, suffix)
-  triples. The mandatory control. Without it I can't tell whether any
-  improvement comes from Mellum or just from teaching Qwen the FIM task
-  format.
-- `fim_mellum`      -- SFT on Mellum-generated middles. The seq-KD condition.
-- `fim_mix`         -- 50/50 mix of gold and mellum middles. Tests
-  whether teacher guidance helps without forcing full imitation.
-- Mellum itself     -- upper bound on the same eval.
+| condition | what it sees during training |
+|---|---|
+| `base` | nothing -- the un-fine-tuned Qwen2.5-Coder-0.5B |
+| `fim_gold` | (prefix, *ground-truth* middle, suffix), 600 codeparrot examples |
+| `fim_mellum` | (prefix, *Mellum-generated* middle, suffix), same 600 examples |
+| `fim_mix` | 50/50 mix of gold and mellum middles |
+| `mellum_4b` | -- (the teacher itself, the upper bound) |
 
-Eval is HumanEval Infilling (the metric Mellum's own card reports:
-0.6621 / 0.3852 / 0.2970 single / multi / random for the base model)
-plus a held-out codeparrot-FIM exact-match check, plus a non-FIM
-HumanEval pass@1 regression to make sure FIM-tuning doesn't hurt
-left-to-right completion. Code is `fim_data.py`, `fim_generate.py`,
-`fim_train.py`, `fim_eval.py`, `humaneval_infilling.py`. The runner
-script `run_fim_experiment.sh` ties it together.
+Hyperparams: 1200 steps, batch 2 × accum 4, lr 2e-5 cosine, middle-only
+loss masking. Greedy Mellum decoding for the seq-KD targets (codex's
+preferred starting point: stable targets, no sampling noise).
 
-What a null result looks like (so I can read the table honestly when it
-runs): `fim_gold > base` but `fim_mellum ≈ fim_gold` would say "the
-lever is FIM adaptation, not distillation from Mellum specifically."
-That's still a result. `fim_mellum > fim_gold` would be the
-interview-grade outcome -- cross-tokenizer transfer working. `fim_mellum
-< fim_gold` would say tokenizer mismatch / teacher-text noise dominates.
-In either case I'd want to verify on RepoBench-Python that FIM tuning
-hasn't broken left-to-right completion, since the public Mellum number
-of `Avg ≤ 8k = 0.299` is a regression check Mellum-the-team must already
-do.
+Eval on two sets:
+
+1. **Held-out codeparrot FIM** (180 examples, 60 per masking kind):
+   exact-match against gold middles. Same distribution as training.
+2. **HumanEval Infilling** (164 examples per subset, fixed seed
+   subsample): the actual published Mellum benchmark. Different
+   distribution, more curated, written-by-hand.
+
+### Held-out codeparrot FIM (in-distribution)
+
+| method | single | multi | random | overall EM | overall middle NLL |
+|---|---|---|---|---|---|
+| base | 0.350 | 0.000 | 0.017 | 0.122 | 1.013 |
+| fim_gold | 0.367 | 0.067 | 0.017 | 0.150 | **0.965** |
+| fim_mellum | 0.383 | 0.083 | 0.000 | 0.156 | 1.018 |
+| **fim_mix** | **0.400** | **0.083** | 0.000 | **0.161** | 0.975 |
+
+In-distribution, FIM training works. Mix wins on EM (+3.9 pp over base);
+gold wins on the NLL-against-gold-middles metric, which it should by
+construction. fim_mellum has *worse* gold-middle NLL than base because
+it learned to generate Mellum-style middles, which differ from gold
+middles in style. But fim_mellum's exact-match is competitive with
+fim_gold, suggesting Mellum's generated middles are closer to the gold
+in actual content than they are in token-level distribution.
+
+### HumanEval Infilling (out-of-distribution, the published benchmark)
+
+Sub-sampled 164 of each subset (full set is 1033/5815/1640) with a
+fixed random seed shared across all five models. pass@1 by running the
+canonical test against `prefix + completion + suffix`:
+
+| method | single | multi | random | mean |
+|---|---|---|---|---|
+| base 0.5B | **0.787** | 0.396 | 0.506 | 0.563 |
+| fim_gold 0.5B | 0.787 | **0.415** | 0.470 | 0.557 |
+| fim_mellum 0.5B | 0.774 | 0.415 | 0.470 | 0.553 |
+| fim_mix 0.5B | 0.768 | 0.390 | 0.470 | 0.543 |
+| mellum_4b (teacher) | 0.738 | **0.537** | **0.683** | **0.652** |
+
+For sanity-check reference, the public Qwen2.5-Coder-0.5B paper reports
+0.754 / 0.473 / 0.460 (mean 0.562) on the full set; my 164-subsample
+base of 0.787 / 0.396 / 0.506 (mean 0.563) is consistent with that.
+Mellum-4b-base reports 0.6621 / 0.3852 / 0.2970 (mean 0.448); my
+Mellum-sft-python is the Python-fine-tuned variant which is known to
+beat the base on Python infill.
+
+The result is unambiguous: **none of the FIM-tuning conditions beat the
+un-fine-tuned base on HumanEval Infilling**. Plain base (mean 0.563)
+edges out every fine-tuned variant (0.543 to 0.557). Mellum-as-teacher
+(fim_mellum, 0.553) is below the gold-data control (fim_gold, 0.557).
+The mix condition is the worst at 0.543.
+
+### What this says
+
+The held-out result and the HumanEval result point in opposite
+directions. FIM training improves performance on the
+training-distribution (codeparrot) and degrades it on the
+distribution-shift benchmark (HumanEval). The student is learning the
+*style* of the training corpus, not the *task* of FIM.
+
+The reason is the one Bavarian et al. (2022) flag in the FIM
+pretraining paper: FIM capability comes from the data transformation
+*at pretraining scale*, not from a small fine-tune. Qwen2.5-Coder-0.5B
+was already FIM-pretrained on billions of tokens. My 600-example
+fine-tune adds noise relative to that.
+
+The Mellum-as-teacher signal is also not visible at this scale.
+fim_mellum and fim_gold are within noise of each other on both evals; the
+direction of effect on HumanEval Infilling (fim_mellum slightly worse
+than fim_gold) is consistent with "Mellum's text outputs are sometimes
+slightly off-distribution for the canonical-solution form HumanEval
+expects." A larger Mellum-generated corpus, or distillation that
+preserves Mellum's actual logits rather than its decoded text, might
+shift this. Cross-tokenizer logit distillation is the obvious next
+step but the engineering is real: two incompatible BPE schemes need
+either a byte-level alignment between teacher and student tokens or
+a soft-token bridge in the spirit of Boizard et al. 2024 (Universal
+Logit Distillation, arXiv:2402.12030).
+
+The single positive signal is that fim_gold and fim_mellum *both*
+improve multi-line HumanEval pass@1 over base (0.415 vs 0.396, +1.9pp
+each). That's small but in the right direction, and exactly the
+sub-task where the larger context dependency of FIM training would
+matter most. The held-out EM differences on codeparrot multi-line
+(base 0.000, fim_gold 0.067, fim_mellum 0.083, fim_mix 0.083) point
+the same way -- multi-line is where the fine-tune produces the
+clearest gain.
+
+### What I'd change
+
+1. **Scale the seq-KD corpus.** 600 examples is way too few. Bavarian
+   et al. (2022) get FIM capability from training on billions of FIM
+   tokens; I should be at 50K-500K examples minimum to expect fine-tune
+   to beat what Qwen already learned.
+2. **Use FIM-format-friendly data.** codeparrot files are real GitHub
+   repos with messy structure; HumanEval is curated short Python
+   functions. The training distribution should match the eval
+   distribution at least roughly. MBPP-Plus or
+   bigcode/code-search-net would be a closer match.
+3. **Cross-tokenizer logit distillation.** Sequence-level KD throws
+   away the per-token uncertainty information. ULD (Boizard et al.
+   2024, arXiv:2402.12030) projects across incompatible tokenizers
+   and preserves more of the teacher signal than text-level
+   pseudo-labelling. Worth trying if seq-KD really is the bottleneck.
+4. **Stop training earlier.** All three FIM trainings overfit -- best
+   val_middle_nll is at step 300 (the first checkpoint), then drifts up.
+   I'd checkpoint and select the best step rather than the last.
 
 ## What I'd do with another week beyond that
 

@@ -76,18 +76,33 @@ make_table.py      pretty-prints results/eval.json
 results/           per-run training logs, eval.json, spec_eval.json, per_position.json, spec_eval_seeds.json
 report.md          writeup with the discussion + algebraic derivation tying spec-decode to TV
 
-fim_data.py            (pending compute) build (prefix, middle, suffix) FIM examples
-fim_generate.py        (pending compute) Mellum-4b-sft-python generates middles for seq-KD
-fim_train.py           (pending compute) train Qwen on FIM data, gold/mellum/mix middle sources
-fim_eval.py            (pending compute) held-out FIM exact-match
-humaneval_infilling.py (pending compute) the actual benchmark Mellum's card reports
-run_fim_experiment.sh  (pending compute) end-to-end runner
+fim_data.py            build (prefix, middle, suffix) FIM examples from codeparrot
+fim_generate.py        Mellum-4b-sft-python generates middles for seq-KD
+fim_train.py           train Qwen on FIM data, gold/mellum/mix middle sources
+fim_eval.py            held-out FIM exact-match against gold middles
+humaneval_infilling.py the actual benchmark Mellum's card reports (single/multi/random)
+modal_app.py           the Modal serverless runner (A10G, image bakes the 3 models)
+run_fim_experiment.sh  local-GPU runner; modal_app.py is the cloud-GPU runner
 ```
 
-The `(pending compute)` files are the Mellum-as-teacher follow-up
-described in `report.md`. The code is written and tested locally on a
-sample; the experiment was paused mid-run when the GPU box went
-unreachable. Designed so it runs end-to-end with `bash run_fim_experiment.sh`.
+The Mellum-as-teacher follow-up did run, on Modal A10G after the lab
+GPU box went unreachable -- 600 codeparrot examples, three students
+(`fim_gold` / `fim_mellum` / `fim_mix`), evaluated on held-out
+codeparrot FIM exact-match and HumanEval Infilling pass@1 across all
+three subsets at 164 problems per subset. Headline:
+
+| method | held-out EM | HumanEval Infilling mean pass@1 |
+|---|---|---|
+| base 0.5B | 0.122 | 0.563 |
+| fim_gold 0.5B | 0.150 | 0.557 |
+| fim_mellum 0.5B | 0.156 | 0.553 |
+| fim_mix 0.5B | **0.161** | 0.543 |
+| Mellum-4b (teacher) | -- | **0.652** |
+
+In-distribution (codeparrot) every fine-tune helps; out-of-distribution
+(HumanEval Infilling) every fine-tune hurts and the 0.5B base is the
+single best non-teacher number. Discussion in the "Mellum-as-teacher
+seq-KD: did it work?" section of `report.md`.
 
 ## Why these metrics
 
