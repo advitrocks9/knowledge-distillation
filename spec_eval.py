@@ -1,44 +1,24 @@
 """
-Hardened speculative-decoding draft acceptance eval.
+Hardened spec-decode draft-acceptance eval.
 
-The original spec-decode in eval.py used 32 HumanEval prompts and reported
-a single mean. Codex called this out: 32 prompts isn't enough to make a
-ranking statement, the prompt mix matters, draft cycles within a prompt
-aren't independent, and a sign flip between K=2 and K=4 was probably noise.
+The first version (in eval.py) used 32 HumanEval prompts, no error
+bars, asymmetric max_drafts at K=2 vs K=4, and gave me a K=2/K=4
+sign-flip I attached a story to. Code-review pointed out that 32
+prompts can't bracket a K=4 mean, draft cycles within a prompt aren't
+independent, and most of the gap I was reading was noise. This script
+fixes all of that.
 
-This script does the eval the way it should have been done in the first place.
-
-Decisions, with the reasoning written down so I can defend each one:
-
-  Prefix corpus: all 164 HumanEval prompts. Function-completion shape, the
-  closest thing to IDE-relevant code completion. Yes, HumanEval is in
-  pretraining mixes -- so are the alternatives. I don't mix with random
-  codeparrot truncations because random mid-statement truncation inflates
-  next-token sharpness artefactually, and mixing two corpora without a
-  weighting rationale lets the variant ranking flip from mix changes.
-
-  Drafts: sampled at T=1.0 (the rule from Leviathan et al. 2023). Greedy
-  drafts test mode agreement only and flatter the numbers; deployment uses
-  sampled drafts and that's what should be reported. T is locked across
-  variants -- if it's a free knob, it manufactures gaps.
-
-  K: 4 only. K=8 is only worth running if K=4 is precise enough to
-  discriminate trend from variance, and at this prompt count it isn't.
-
-  Bootstrap: by prompt, 1000 resamples, percentile CI. Cycles within a
-  prompt aren't independent so cycle-level bootstrap would understate
-  uncertainty. To not hide cycle-level variance, the report also surfaces
-  the within-prompt CV.
-
-  Eval seed: fixed and shared across variants. Different seeds across
-  runs would let evaluation noise show up as ranking signal.
-
-  Per-position figure: only the first drafted block per prompt. Later
-  cycles are conditioned on accepted student prefixes and bias the
-  position-1 number; first-block-only avoids that. Caveat: first blocks
-  are disproportionately near prompt boundaries, so the curve overstates
-  later-position acceptability for the actual deployed regime. Reported
-  per-position N alongside the mean.
+What it does: all 164 HumanEval prompts (function-completion shape,
+the closest thing to IDE relevant), drafts sampled at T=1.0
+(Leviathan rule, locked across variants), K=4 with up to 8 cycles per
+prompt, by-prompt bootstrap CIs at 95%, within-prompt cycle CV
+reported alongside the mean (a stable mean with high cycle CV is uneven
+user-perceived latency), shared eval seed across variants. Per-position
+acceptance reported only on the first drafted block per prompt to keep
+position-1 from being biased by previously-accepted student prefixes.
+First-block positions are disproportionately near prompt boundaries,
+so the per-position curve overstates later-position acceptance for the
+actual deployed regime; per-position N is reported alongside.
 """
 
 from __future__ import annotations
@@ -115,7 +95,13 @@ def spec_decode_one_prompt(
             pt = p_t[0, pos, tok_id].item()
             ratios.append(min(1.0, pt / ps) if ps > 1e-9 else 0.0)
 
-        # E[accepted run length] = sum_i prod_{j<=i} a_j
+        # Per-block analytic expected accept-run E[L] = sum_i prod_{j<=i} a_j,
+        # where a_j = min(1, p_T/p_S). This is the closed-form expectation
+        # of the Leviathan rejection chain with student-temp-1 drafts; with
+        # 164 prompts and ~8 cycles each, the sample mean of an actual
+        # rejection roll converges to this same number, with slightly wider
+        # bootstrap CIs. Reporting the expectation directly removes one
+        # source of eval noise so the variant ranking surfaces.
         cum = 1.0
         run = 0.0
         for r in ratios:
@@ -126,9 +112,12 @@ def spec_decode_one_prompt(
         if first_block_pos_probs is None:
             first_block_pos_probs = ratios + [None] * (K - len(ratios))
 
-        # advance by an integer accepted prefix length: standard spec-decode
-        # advances by the actually accepted prefix; for the proxy I round
-        # the expected run length, since we don't roll the Bernoulli
+        # Advance step is a proxy: real spec-decode advances by the actually
+        # accepted prefix length per cycle (a sample from the rejection
+        # chain); I advance by the integer-rounded expectation so cycles
+        # progress at the same average rate without rolling a Bernoulli.
+        # First-cycle stats (the per_position numbers) are unaffected by
+        # this choice; later-cycle prefix positions shift slightly.
         advance = max(1, min(int(round(run)), new_tokens))
         cur = draft[:, : cur.size(1) + advance]
         if cur.size(1) >= 512:
