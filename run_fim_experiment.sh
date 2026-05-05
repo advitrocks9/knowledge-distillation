@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Mellum-as-teacher seq-KD experiment, end-to-end.
-# Run from the kd-mellum-qwen project dir on the gpu box.
+# Run from the project dir on a CUDA host (4090 or Modal A10G).
 
 set -euo pipefail
 
