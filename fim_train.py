@@ -162,7 +162,7 @@ def fim_loss(s_logits: torch.Tensor, ids: torch.Tensor, mask: torch.Tensor) -> t
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--middle", required=True, choices=["gold", "mellum", "mix"])
-    ap.add_argument("--student", default="/home/prannayk/models/qwen-coder-0.5b")
+    ap.add_argument("--student", default="Qwen/Qwen2.5-Coder-0.5B")
     ap.add_argument("--data", type=Path, default=Path("data/fim/mellum_completions.jsonl"))
     ap.add_argument("--out-dir", type=Path, default=Path("checkpoints"))
     ap.add_argument("--steps", type=int, default=1500)

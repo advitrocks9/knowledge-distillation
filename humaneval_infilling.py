@@ -184,9 +184,9 @@ def evaluate(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--student-base", default="/home/prannayk/models/qwen-coder-0.5b")
+    ap.add_argument("--student-base", default="Qwen/Qwen2.5-Coder-0.5B")
     ap.add_argument("--ckpt-dir", type=Path, default=Path("checkpoints"))
-    ap.add_argument("--mellum", default="/home/prannayk/models/mellum-sft-python")
+    ap.add_argument("--mellum", default="JetBrains/Mellum-4b-sft-python")
     ap.add_argument("--out", type=Path, default=Path("results/humaneval_infilling.json"))
     ap.add_argument("--n-problems", type=int, default=100,
                     help="problems per subset; full set is 1033/5815/1640 -- defaults to a 100-per-subset subsample with a fixed seed")

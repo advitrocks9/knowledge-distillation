@@ -134,7 +134,7 @@ def eval_one(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--student-base", default="/home/prannayk/models/qwen-coder-0.5b")
+    ap.add_argument("--student-base", default="Qwen/Qwen2.5-Coder-0.5B")
     ap.add_argument("--ckpt-dir", type=Path, default=Path("checkpoints"))
     ap.add_argument("--data", type=Path, default=Path("data/fim/eval_examples.jsonl"))
     ap.add_argument("--out", type=Path, default=Path("results/fim_eval.json"))

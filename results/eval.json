@@ -1,7 +1,7 @@
 {
   "teacher": {
     "name": "teacher",
-    "ckpt": "/home/prannayk/models/qwen-coder-1.5b",
+    "ckpt": "Qwen/Qwen2.5-Coder-1.5B",
     "held_out_nll": 1.0724882645026754,
     "humaneval": {
       "n": 164,
@@ -849,7 +849,7 @@
   },
   "student_base": {
     "name": "student_base",
-    "ckpt": "/home/prannayk/models/qwen-coder-0.5b",
+    "ckpt": "Qwen/Qwen2.5-Coder-0.5B",
     "held_out_nll": 1.2844854629575826,
     "humaneval": {
       "n": 164,

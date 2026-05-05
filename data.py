@@ -77,7 +77,7 @@ if __name__ == "__main__":
     ap.add_argument("--n-train", type=int, default=2048)
     ap.add_argument("--n-val", type=int, default=128)
     ap.add_argument("--seq-len", type=int, default=512)
-    ap.add_argument("--tokenizer", default="/home/prannayk/models/qwen-coder-0.5b")
+    ap.add_argument("--tokenizer", default="Qwen/Qwen2.5-Coder-0.5B")
     ap.add_argument("--out", type=Path, default=Path("data/cache"))
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()

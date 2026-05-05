@@ -25,9 +25,13 @@ prompts, K=4, sampled drafts at T=1.0, bootstrap-by-prompt 95% CIs):
 | student + rkl | **2.573** | [2.474, 2.684] |
 | student + gkd | 2.562 | [2.460, 2.658] |
 
-Paired-bootstrap deltas on per-prompt acceptance (per-prompt RNG is
-shared across variants by `rng_seed = eval_seed * 1_000_003 + i` in
-`spec_eval.py`, so the design is paired):
+Paired CIs on per-prompt deltas (per-prompt RNG is shared across
+variants by `rng_seed = eval_seed * 1_000_003 + i` in `spec_eval.py`,
+so the design is paired by construction; `spec_eval.json` only persists
+aggregates, so `analyses/paired_bootstrap.py` falls through to the
+marginal upper bound `var(delta) <= var(a) + var(b)`, which assumes
+independence and is therefore conservative — the real paired CI is
+narrower):
 
 | pair | mean delta | 95% CI |
 |---|---|---|
@@ -35,12 +39,9 @@ shared across variants by `rng_seed = eval_seed * 1_000_003 + i` in
 | gkd - ce | +0.203 | [+0.064, +0.342] |
 | fkl - ce | +0.118 | [-0.024, +0.260] |
 
-`rkl > ce` and `gkd > ce` are paired-significant (lo > 0); fkl > ce is
-consistent in direction across prompts but the paired CI crosses zero.
-The current `spec_eval.json` only persists aggregates, so these CIs come
-from the marginal upper bound `var(delta) <= var(a) + var(b)` in
-`analyses/paired_bootstrap.py`. The actual paired CI is narrower, since
-per-prompt deltas are positively correlated by the shared seed.
+`rkl > ce` and `gkd > ce` are significant even at this conservative
+upper bound; fkl > ce is consistent in direction across prompts but
+the paired CI crosses zero.
 
 Three-seed retraining of CE and RKL (the pair that survived the
 single-seed eval) confirms the gap: CE mean 2.378 (seed std 0.008),
@@ -75,10 +76,11 @@ That column is too small to discriminate the methods.
 ```bash
 uv sync
 python data.py                                       # tokenise corpus
-python distill.py --loss ce  --steps 2500 --lr 2e-5  # baseline
-python distill.py --loss fkl --steps 2500 --lr 2e-5  # forward KL
-python distill.py --loss rkl --steps 2500 --lr 2e-5  # reverse KL
-python distill.py --loss gkd --steps 2500 --lr 2e-5  # on-policy reverse KL
+# the actual runs used --batch-size 2 --grad-accum 4 --eval-every 250 (effective batch 8); defaults are 4/2/500
+python distill.py --loss ce  --steps 2500 --batch-size 2 --grad-accum 4 --eval-every 250 --lr 2e-5  # baseline
+python distill.py --loss fkl --steps 2500 --batch-size 2 --grad-accum 4 --eval-every 250 --lr 2e-5  # forward KL
+python distill.py --loss rkl --steps 2500 --batch-size 2 --grad-accum 4 --eval-every 250 --lr 2e-5  # reverse KL
+python distill.py --loss gkd --steps 2500 --batch-size 2 --grad-accum 4 --eval-every 250 --lr 2e-5  # on-policy reverse KL
 python eval.py                                       # HumanEval pass@1, NLL, spec-decode
 python make_table.py                                 # markdown table
 ```
@@ -108,8 +110,8 @@ modal_app.py           the Modal serverless runner (A10G, image bakes the 3 mode
 run_fim_experiment.sh  local-GPU runner; modal_app.py is the cloud-GPU runner
 ```
 
-The Mellum-as-teacher follow-up did run, on Modal A10G after the lab
-GPU box went unreachable -- 600 codeparrot examples, three students
+The Mellum-as-teacher follow-up ran on Modal A10G -- 600 codeparrot
+examples, three students
 (`fim_gold` / `fim_mellum` / `fim_mix`), evaluated on three columns:
 held-out codeparrot FIM exact-match (in-distribution), HumanEval
 Infilling pass@1 (out-of-distribution FIM), and RepoBench-Python

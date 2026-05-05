@@ -343,8 +343,8 @@ def distill(cfg: Cfg) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--loss", required=True, choices=["ce", "fkl", "rkl", "gkd"])
-    ap.add_argument("--teacher", default="/home/prannayk/models/qwen-coder-1.5b")
-    ap.add_argument("--student", default="/home/prannayk/models/qwen-coder-0.5b")
+    ap.add_argument("--teacher", default="Qwen/Qwen2.5-Coder-1.5B")
+    ap.add_argument("--student", default="Qwen/Qwen2.5-Coder-0.5B")
     ap.add_argument("--train-pt", type=Path, default=Path("data/cache/train.pt"))
     ap.add_argument("--val-pt", type=Path, default=Path("data/cache/val.pt"))
     ap.add_argument("--out-dir", type=Path, default=Path("checkpoints"))

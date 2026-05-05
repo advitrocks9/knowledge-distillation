@@ -12,8 +12,8 @@ from spec_eval import evaluate_one, load_model
 
 
 def main() -> None:
-    teacher_path = "/home/prannayk/models/qwen-coder-1.5b"
-    student_base = "/home/prannayk/models/qwen-coder-0.5b"
+    teacher_path = "Qwen/Qwen2.5-Coder-1.5B"
+    student_base = "Qwen/Qwen2.5-Coder-0.5B"
     ckpt_dir = Path("checkpoints")
     out_path = Path("results/spec_eval_seeds.json")
 

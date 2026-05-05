@@ -1,8 +1,8 @@
 {
   "cfg": {
     "loss": "rkl",
-    "teacher": "/home/prannayk/models/qwen-coder-1.5b",
-    "student": "/home/prannayk/models/qwen-coder-0.5b",
+    "teacher": "Qwen/Qwen2.5-Coder-1.5B",
+    "student": "Qwen/Qwen2.5-Coder-0.5B",
     "train_pt": "data/cache/train.pt",
     "val_pt": "data/cache/val.pt",
     "out_dir": "checkpoints",

@@ -276,8 +276,8 @@ def evaluate_one(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--teacher", default="/home/prannayk/models/qwen-coder-1.5b")
-    ap.add_argument("--student-base", default="/home/prannayk/models/qwen-coder-0.5b")
+    ap.add_argument("--teacher", default="Qwen/Qwen2.5-Coder-1.5B")
+    ap.add_argument("--student-base", default="Qwen/Qwen2.5-Coder-0.5B")
     ap.add_argument("--ckpt-dir", type=Path, default=Path("checkpoints"))
     ap.add_argument("--val-pt", type=Path, default=Path("data/cache/val.pt"))
     ap.add_argument("--out", type=Path, default=Path("results/eval.json"))

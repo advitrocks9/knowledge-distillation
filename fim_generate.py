@@ -87,7 +87,7 @@ def generate_batch(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--teacher", default="/home/prannayk/models/mellum-sft-python")
+    ap.add_argument("--teacher", default="JetBrains/Mellum-4b-sft-python")
     ap.add_argument("--in-jsonl", type=Path, default=Path("data/fim/examples.jsonl"))
     ap.add_argument("--out-jsonl", type=Path, default=Path("data/fim/mellum_completions.jsonl"))
     ap.add_argument("--max-new", type=int, default=200)
